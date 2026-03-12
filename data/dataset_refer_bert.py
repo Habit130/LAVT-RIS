@@ -23,6 +23,7 @@ class ReferDataset(data.Dataset):
         self.target_transform = target_transforms
         self.split = split
         self.eval_mode = eval_mode
+        self.caption_index = args.caption_index
         self.max_tokens = args.text_max_tokens
         self.dataset_root = Path(args.dataset_root).expanduser().resolve()
         self.tokenizer = BertTokenizer.from_pretrained(args.bert_tokenizer)
@@ -55,30 +56,25 @@ class ReferDataset(data.Dataset):
             mask_path = self._resolve_path(sample.get('mask'))
             captions = self._normalize_captions(sample)
             sample_id = sample.get('id', image_path.stem)
+            selected_caption = self._select_caption(captions, sample_id)
 
             self.samples.append({
                 'id': sample_id,
                 'image_path': image_path,
                 'mask_path': mask_path,
-                'captions': captions,
+                'caption': selected_caption,
             })
 
-            sentences_for_sample = []
-            attentions_for_sample = []
-            for caption in captions:
-                token_ids = self.tokenizer.encode(text=caption, add_special_tokens=True)
-                token_ids = token_ids[:self.max_tokens]
+            token_ids = self.tokenizer.encode(text=selected_caption, add_special_tokens=True)
+            token_ids = token_ids[:self.max_tokens]
 
-                padded_input_ids = [0] * self.max_tokens
-                attention_mask = [0] * self.max_tokens
-                padded_input_ids[:len(token_ids)] = token_ids
-                attention_mask[:len(token_ids)] = [1] * len(token_ids)
+            padded_input_ids = [0] * self.max_tokens
+            attention_mask = [0] * self.max_tokens
+            padded_input_ids[:len(token_ids)] = token_ids
+            attention_mask[:len(token_ids)] = [1] * len(token_ids)
 
-                sentences_for_sample.append(torch.tensor(padded_input_ids).unsqueeze(0))
-                attentions_for_sample.append(torch.tensor(attention_mask).unsqueeze(0))
-
-            self.input_ids.append(sentences_for_sample)
-            self.attention_masks.append(attentions_for_sample)
+            self.input_ids.append(torch.tensor(padded_input_ids).unsqueeze(0))
+            self.attention_masks.append(torch.tensor(attention_mask).unsqueeze(0))
 
     def _normalize_captions(self, sample):
         raw_captions = sample.get('caption')
@@ -105,6 +101,14 @@ class ReferDataset(data.Dataset):
 
         return captions
 
+    def _select_caption(self, captions, sample_id):
+        try:
+            return captions[self.caption_index]
+        except IndexError as exc:
+            raise IndexError(
+                f"Sample {sample_id} has {len(captions)} captions, but caption_index={self.caption_index} is out of range"
+            ) from exc
+
     def _resolve_path(self, path_value):
         if not path_value:
             raise KeyError(f"Split '{self.split}' contains a sample without image/mask path")
@@ -130,7 +134,6 @@ class ReferDataset(data.Dataset):
 
         image = Image.open(sample['image_path']).convert('RGB')
         mask = np.array(Image.open(sample['mask_path']))
-        # Collapse all non-zero class ids into a single foreground class.
         mask = (mask > 0).astype(np.uint8)
         target = Image.fromarray(mask, mode='L')
 
@@ -140,18 +143,11 @@ class ReferDataset(data.Dataset):
         if self.target_transform is not None:
             target = self.target_transform(target)
 
-        if self.eval_mode:
-            embeddings = []
-            attentions = []
-            for sentence_tensor, attention_tensor in zip(self.input_ids[index], self.attention_masks[index]):
-                embeddings.append(sentence_tensor.unsqueeze(-1))
-                attentions.append(attention_tensor.unsqueeze(-1))
+        tensor_embeddings = self.input_ids[index]
+        attention_mask = self.attention_masks[index]
 
-            tensor_embeddings = torch.cat(embeddings, dim=-1)
-            attention_mask = torch.cat(attentions, dim=-1)
-        else:
-            choice_sent = np.random.choice(len(self.input_ids[index]))
-            tensor_embeddings = self.input_ids[index][choice_sent]
-            attention_mask = self.attention_masks[index][choice_sent]
+        if self.eval_mode:
+            tensor_embeddings = tensor_embeddings.unsqueeze(-1)
+            attention_mask = attention_mask.unsqueeze(-1)
 
         return image, target, tensor_embeddings, attention_mask

@@ -7,6 +7,8 @@ def get_parser():
                         help='if true, set amsgrad to True in an Adam or AdamW optimizer.')
     parser.add_argument('-b', '--batch-size', default=8, type=int)
     parser.add_argument('--bert_tokenizer', default='bert-base-uncased', help='BERT tokenizer')
+    parser.add_argument('--caption_index', default=2, type=int,
+                        help='0-based caption index used for both training and testing')
     parser.add_argument('--ck_bert', default='bert-base-uncased', help='pre-trained BERT weights')
     parser.add_argument('--dataset', default='local_json',
                         help='dataset tag used for experiment naming; data is read from local JSON splits')
@@ -59,6 +61,3 @@ def get_parser():
 if __name__ == "__main__":
     parser = get_parser()
     args_dict = parser.parse_args()
-
-
-
