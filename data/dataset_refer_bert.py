@@ -1,24 +1,12 @@
-import os
-import sys
-import torch.utils.data as data
-import torch
-from torchvision import transforms
-from torch.autograd import Variable
+import json
+from pathlib import Path
+
 import numpy as np
 from PIL import Image
-import torchvision.transforms.functional as TF
-import random
+import torch
+import torch.utils.data as data
 
 from bert.tokenization_bert import BertTokenizer
-
-import h5py
-from refer.refer import REFER
-
-from args import get_parser
-
-# Dataset configuration initialization
-parser = get_parser()
-args = parser.parse_args()
 
 
 class ReferDataset(data.Dataset):
@@ -30,92 +18,140 @@ class ReferDataset(data.Dataset):
                  split='train',
                  eval_mode=False):
 
-        self.classes = []
+        self.classes = ['background', 'foreground']
         self.image_transforms = image_transforms
         self.target_transform = target_transforms
         self.split = split
-        self.refer = REFER(args.refer_data_root, args.dataset, args.splitBy)
-
-        self.max_tokens = 20
-
-        ref_ids = self.refer.getRefIds(split=self.split)
-        img_ids = self.refer.getImgIds(ref_ids)
-
-        all_imgs = self.refer.Imgs
-        self.imgs = list(all_imgs[i] for i in img_ids)
-        self.ref_ids = ref_ids
-
-        self.input_ids = []
-        self.attention_masks = []
+        self.eval_mode = eval_mode
+        self.max_tokens = args.text_max_tokens
+        self.dataset_root = Path(args.dataset_root).expanduser().resolve()
         self.tokenizer = BertTokenizer.from_pretrained(args.bert_tokenizer)
 
-        self.eval_mode = eval_mode
-        # if we are testing on a dataset, test all sentences of an object;
-        # o/w, we are validating during training, randomly sample one sentence for efficiency
-        for r in ref_ids:
-            ref = self.refer.Refs[r]
+        split_files = {
+            'train': args.train_json,
+            'test': args.test_json,
+        }
+        if self.split not in split_files:
+            raise ValueError(
+                f"Unsupported split '{self.split}'. Available splits: {sorted(split_files)}"
+            )
 
-            sentences_for_ref = []
-            attentions_for_ref = []
+        annotations_path = self.dataset_root / split_files[self.split]
+        if not annotations_path.is_file():
+            raise FileNotFoundError(f'Annotation file not found: {annotations_path}')
 
-            for i, (el, sent_id) in enumerate(zip(ref['sentences'], ref['sent_ids'])):
-                sentence_raw = el['raw']
-                attention_mask = [0] * self.max_tokens
+        with annotations_path.open('r', encoding='utf-8') as handle:
+            samples = json.load(handle)
+
+        if not isinstance(samples, list):
+            raise ValueError(f'Expected a list of samples in {annotations_path}, got {type(samples).__name__}')
+
+        self.samples = []
+        self.input_ids = []
+        self.attention_masks = []
+
+        for sample in samples:
+            image_path = self._resolve_path(sample.get('image'))
+            mask_path = self._resolve_path(sample.get('mask'))
+            captions = self._normalize_captions(sample)
+            sample_id = sample.get('id', image_path.stem)
+
+            self.samples.append({
+                'id': sample_id,
+                'image_path': image_path,
+                'mask_path': mask_path,
+                'captions': captions,
+            })
+
+            sentences_for_sample = []
+            attentions_for_sample = []
+            for caption in captions:
+                token_ids = self.tokenizer.encode(text=caption, add_special_tokens=True)
+                token_ids = token_ids[:self.max_tokens]
+
                 padded_input_ids = [0] * self.max_tokens
+                attention_mask = [0] * self.max_tokens
+                padded_input_ids[:len(token_ids)] = token_ids
+                attention_mask[:len(token_ids)] = [1] * len(token_ids)
 
-                input_ids = self.tokenizer.encode(text=sentence_raw, add_special_tokens=True)
+                sentences_for_sample.append(torch.tensor(padded_input_ids).unsqueeze(0))
+                attentions_for_sample.append(torch.tensor(attention_mask).unsqueeze(0))
 
-                # truncation of tokens
-                input_ids = input_ids[:self.max_tokens]
+            self.input_ids.append(sentences_for_sample)
+            self.attention_masks.append(attentions_for_sample)
 
-                padded_input_ids[:len(input_ids)] = input_ids
-                attention_mask[:len(input_ids)] = [1]*len(input_ids)
+    def _normalize_captions(self, sample):
+        raw_captions = sample.get('caption')
+        if raw_captions is None:
+            raw_captions = sample.get('captions')
+        if raw_captions is None:
+            raw_captions = sample.get('sentence')
+        if raw_captions is None:
+            raw_captions = sample.get('sentences')
+        if raw_captions is None:
+            raise KeyError(f"Sample {sample.get('id', '<unknown>')} does not contain a caption field")
 
-                sentences_for_ref.append(torch.tensor(padded_input_ids).unsqueeze(0))
-                attentions_for_ref.append(torch.tensor(attention_mask).unsqueeze(0))
+        if isinstance(raw_captions, str):
+            captions = [raw_captions]
+        elif isinstance(raw_captions, list):
+            captions = [str(caption) for caption in raw_captions if str(caption).strip()]
+        else:
+            raise TypeError(
+                f"Sample {sample.get('id', '<unknown>')} has unsupported caption type {type(raw_captions).__name__}"
+            )
 
-            self.input_ids.append(sentences_for_ref)
-            self.attention_masks.append(attentions_for_ref)
+        if not captions:
+            raise ValueError(f"Sample {sample.get('id', '<unknown>')} does not contain a usable caption")
+
+        return captions
+
+    def _resolve_path(self, path_value):
+        if not path_value:
+            raise KeyError(f"Split '{self.split}' contains a sample without image/mask path")
+
+        path = Path(path_value)
+        if not path.is_absolute():
+            path = self.dataset_root / path
+        path = path.resolve()
+
+        if not path.is_file():
+            raise FileNotFoundError(f'File referenced by split {self.split} not found: {path}')
+
+        return path
 
     def get_classes(self):
         return self.classes
 
     def __len__(self):
-        return len(self.ref_ids)
+        return len(self.samples)
 
     def __getitem__(self, index):
-        this_ref_id = self.ref_ids[index]
-        this_img_id = self.refer.getImgIds(this_ref_id)
-        this_img = self.refer.Imgs[this_img_id[0]]
+        sample = self.samples[index]
 
-        img = Image.open(os.path.join(self.refer.IMAGE_DIR, this_img['file_name'])).convert("RGB")
-
-        ref = self.refer.loadRefs(this_ref_id)
-
-        ref_mask = np.array(self.refer.getMask(ref[0])['mask'])
-        annot = np.zeros(ref_mask.shape)
-        annot[ref_mask == 1] = 1
-
-        annot = Image.fromarray(annot.astype(np.uint8), mode="P")
+        image = Image.open(sample['image_path']).convert('RGB')
+        mask = np.array(Image.open(sample['mask_path']))
+        # Collapse all non-zero class ids into a single foreground class.
+        mask = (mask > 0).astype(np.uint8)
+        target = Image.fromarray(mask, mode='L')
 
         if self.image_transforms is not None:
-            # resize, from PIL to tensor, and mean and std normalization
-            img, target = self.image_transforms(img, annot)
+            image, target = self.image_transforms(image, target)
+
+        if self.target_transform is not None:
+            target = self.target_transform(target)
 
         if self.eval_mode:
-            embedding = []
-            att = []
-            for s in range(len(self.input_ids[index])):
-                e = self.input_ids[index][s]
-                a = self.attention_masks[index][s]
-                embedding.append(e.unsqueeze(-1))
-                att.append(a.unsqueeze(-1))
+            embeddings = []
+            attentions = []
+            for sentence_tensor, attention_tensor in zip(self.input_ids[index], self.attention_masks[index]):
+                embeddings.append(sentence_tensor.unsqueeze(-1))
+                attentions.append(attention_tensor.unsqueeze(-1))
 
-            tensor_embeddings = torch.cat(embedding, dim=-1)
-            attention_mask = torch.cat(att, dim=-1)
+            tensor_embeddings = torch.cat(embeddings, dim=-1)
+            attention_mask = torch.cat(attentions, dim=-1)
         else:
             choice_sent = np.random.choice(len(self.input_ids[index]))
             tensor_embeddings = self.input_ids[index][choice_sent]
             attention_mask = self.attention_masks[index][choice_sent]
 
-        return img, target, tensor_embeddings, attention_mask
+        return image, target, tensor_embeddings, attention_mask

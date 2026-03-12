@@ -4,8 +4,7 @@ import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 import numpy as np
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
-from .mmcv_custom import load_checkpoint
-from mmseg.utils import get_root_logger
+from .checkpoint_utils import get_root_logger, load_checkpoint
 
 
 class Mlp(nn.Module):
@@ -713,3 +712,4 @@ class SpatialImageLanguageAttention(nn.Module):
         out = out.permute(0, 2, 1)  # (B, HW, value_channels)
 
         return out
+

@@ -1,0 +1,24 @@
+name: lavt-ris-linux
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pytorch=2.1.1
+  - torchvision=0.16.1
+  - torchaudio=2.1.1
+  - pytorch-cuda=11.8
+  - numpy=1.26
+  - pillow
+  - scipy
+  - scikit-image
+  - pip
+  - pip:
+      - requests
+      - filelock
+      - tqdm
+      - timm>=0.9.12,<1.0
+      - ftfy
+      - regex

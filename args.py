@@ -8,7 +8,10 @@ def get_parser():
     parser.add_argument('-b', '--batch-size', default=8, type=int)
     parser.add_argument('--bert_tokenizer', default='bert-base-uncased', help='BERT tokenizer')
     parser.add_argument('--ck_bert', default='bert-base-uncased', help='pre-trained BERT weights')
-    parser.add_argument('--dataset', default='refcoco', help='refcoco, refcoco+, or refcocog')
+    parser.add_argument('--dataset', default='local_json',
+                        help='dataset tag used for experiment naming; data is read from local JSON splits')
+    parser.add_argument('--dataset_root', default='../dataset',
+                        help='root directory containing split JSON files and referenced image/mask paths')
     parser.add_argument('--ddp_trained_weights', action='store_true',
                         help='Only needs specified when testing,'
                              'whether the weights to be loaded are from a DDP-trained model')
@@ -16,7 +19,8 @@ def get_parser():
     parser.add_argument('--epochs', default=40, type=int, metavar='N', help='number of total epochs to run')
     parser.add_argument('--fusion_drop', default=0.0, type=float, help='dropout rate for PWAMs')
     parser.add_argument('--img_size', default=480, type=int, help='input image size')
-    parser.add_argument("--local_rank", type=int, help='local rank for DistributedDataParallel')
+    parser.add_argument('--local-rank', '--local_rank', dest='local_rank', type=int,
+                        help='local rank for DistributedDataParallel')
     parser.add_argument('--lr', default=0.00005, type=float, help='the initial learning rate')
     parser.add_argument('--mha', default='', help='If specified, should be in the format of a-b-c-d, e.g., 4-4-4-4,'
                                                   'where a, b, c, and d refer to the numbers of heads in stage-1,'
@@ -35,6 +39,12 @@ def get_parser():
     parser.add_argument('--splitBy', default='unc', help='change to umd or google when the dataset is G-Ref (RefCOCOg)')
     parser.add_argument('--swin_type', default='base',
                         help='tiny, small, base, or large variants of the Swin Transformer')
+    parser.add_argument('--test_json', default='test.json',
+                        help='test split annotation file relative to dataset_root')
+    parser.add_argument('--text_max_tokens', default=20, type=int,
+                        help='maximum number of BERT tokens kept for each caption')
+    parser.add_argument('--train_json', default='train.json',
+                        help='train split annotation file relative to dataset_root')
     parser.add_argument('--wd', '--weight-decay', default=1e-2, type=float, metavar='W', help='weight decay',
                         dest='weight_decay')
     parser.add_argument('--window12', action='store_true',
@@ -49,3 +59,6 @@ def get_parser():
 if __name__ == "__main__":
     parser = get_parser()
     args_dict = parser.parse_args()
+
+
+

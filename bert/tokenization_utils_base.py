@@ -28,8 +28,17 @@ from enum import Enum
 from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
 
 import numpy as np
-from tokenizers import AddedToken
-from tokenizers import Encoding as EncodingFast
+
+try:
+    from tokenizers import AddedToken
+    from tokenizers import Encoding as EncodingFast
+except ImportError:
+    class AddedToken(str):
+        def __new__(cls, content, *args, **kwargs):
+            return str.__new__(cls, content)
+
+    class EncodingFast(object):
+        pass
 
 from .file_utils import (
     add_end_docstrings,
@@ -2315,3 +2324,4 @@ class PreTrainedTokenizerBase(SpecialTokensMixin):
             .replace(" 're", "'re")
         )
         return out_string
+
