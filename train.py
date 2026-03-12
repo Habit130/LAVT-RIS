@@ -1,9 +1,9 @@
 import datetime
+import gc
+import operator
 import os
 import time
 from functools import reduce
-import gc
-import operator
 
 import torch
 import torch.utils.data
@@ -18,6 +18,7 @@ import utils
 
 def get_dataset(image_set, transform, args):
     from data.dataset_refer_bert import ReferDataset
+
     dataset = ReferDataset(
         args,
         split=image_set,
@@ -102,46 +103,61 @@ def build_checkpoint(args, epoch, single_model, optimizer, lr_scheduler, single_
 
 
 def main(args):
-    dataset, num_classes = get_dataset('train', get_transform(args=args), args=args)
+    dataset, _ = get_dataset('train', get_transform(args=args), args=args)
 
     print(f"local rank {args.local_rank} / global rank {utils.get_rank()} successfully built train dataset.")
-    num_tasks = utils.get_world_size()
-    global_rank = utils.get_rank()
-    train_sampler = torch.utils.data.distributed.DistributedSampler(
-        dataset,
-        num_replicas=num_tasks,
-        rank=global_rank,
-        shuffle=True,
-    )
-
-    data_loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        sampler=train_sampler,
-        num_workers=args.workers,
-        pin_memory=args.pin_mem,
-        drop_last=True,
-    )
+    if args.distributed:
+        train_sampler = torch.utils.data.distributed.DistributedSampler(
+            dataset,
+            num_replicas=utils.get_world_size(),
+            rank=utils.get_rank(),
+            shuffle=True,
+        )
+        data_loader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            sampler=train_sampler,
+            num_workers=args.workers,
+            pin_memory=args.pin_mem,
+            drop_last=True,
+        )
+    else:
+        train_sampler = None
+        data_loader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=args.workers,
+            pin_memory=args.pin_mem,
+            drop_last=True,
+        )
 
     print(args.model)
     model = segmentation.__dict__[args.model](pretrained=args.pretrained_swin_weights, args=args)
-    model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+    if args.distributed:
+        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
     model.cuda()
-    model = torch.nn.parallel.DistributedDataParallel(
-        model,
-        device_ids=[args.local_rank],
-        find_unused_parameters=True,
-    )
-    single_model = model.module
+    if args.distributed:
+        model = torch.nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[args.local_rank],
+            find_unused_parameters=True,
+        )
+        single_model = model.module
+    else:
+        single_model = model
 
     if args.model != 'lavt_one':
         model_class = BertModel
         bert_model = model_class.from_pretrained(args.ck_bert)
         bert_model.pooler = None
         bert_model.cuda()
-        bert_model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(bert_model)
-        bert_model = torch.nn.parallel.DistributedDataParallel(bert_model, device_ids=[args.local_rank])
-        single_bert_model = bert_model.module
+        if args.distributed:
+            bert_model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(bert_model)
+            bert_model = torch.nn.parallel.DistributedDataParallel(bert_model, device_ids=[args.local_rank])
+            single_bert_model = bert_model.module
+        else:
+            single_bert_model = bert_model
     else:
         bert_model = None
         single_bert_model = None
@@ -206,7 +222,8 @@ def main(args):
 
     last_checkpoint = None
     for epoch in range(max(0, resume_epoch + 1), args.epochs):
-        data_loader.sampler.set_epoch(epoch)
+        if args.distributed and train_sampler is not None:
+            train_sampler.set_epoch(epoch)
         iterations = train_one_epoch(
             model,
             criterion,

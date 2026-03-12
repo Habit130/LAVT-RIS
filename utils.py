@@ -203,29 +203,34 @@ def save_on_master(*args, **kwargs):
 
 
 def init_distributed_mode(args):
+    args.distributed = False
+
     if args.local_rank is None and 'LOCAL_RANK' in os.environ:
         args.local_rank = int(os.environ['LOCAL_RANK'])
 
-    if args.local_rank is None:
-        raise RuntimeError(
-            'local_rank is not set. Launch training with torchrun, for example: '
-            'torchrun --standalone --nproc_per_node=1 train.py ...'
-        )
+    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ and args.local_rank is not None:
+        rank = int(os.environ['RANK'])
+        world_size = int(os.environ['WORLD_SIZE'])
+        print(f"RANK and WORLD_SIZE in environment: {rank}/{world_size}")
 
-    if 'RANK' not in os.environ or 'WORLD_SIZE' not in os.environ:
-        raise RuntimeError(
-            'Distributed environment variables RANK/WORLD_SIZE are missing. '
-            'Use torchrun or python -m torch.distributed.run to launch training.'
-        )
-
-    rank = int(os.environ['RANK'])
-    world_size = int(os.environ['WORLD_SIZE'])
-    print(f"RANK and WORLD_SIZE in environment: {rank}/{world_size}")
-
-    torch.cuda.set_device(args.local_rank)
-    torch.distributed.init_process_group(backend='nccl', init_method='env://', world_size=world_size, rank=rank)
-    torch.distributed.barrier()
-    setup_for_distributed(is_main_process())
+        if world_size > 1:
+            args.distributed = True
+            torch.cuda.set_device(args.local_rank)
+            torch.distributed.init_process_group(
+                backend='nccl',
+                init_method='env://',
+                world_size=world_size,
+                rank=rank,
+            )
+            torch.distributed.barrier()
+            setup_for_distributed(is_main_process())
+        else:
+            args.local_rank = 0
+            print('Single-process training mode enabled (WORLD_SIZE=1).')
+    else:
+        if args.local_rank is None:
+            args.local_rank = 0
+        print('Single-process training mode enabled (no distributed launcher detected).')
 
     if args.output_dir:
         mkdir(args.output_dir)

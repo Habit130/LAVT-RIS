@@ -6,6 +6,7 @@
 - Training no longer runs a validation split each epoch.
 - Runtime dependencies on `mmcv-full` and `mmsegmentation` were removed.
 - The bundled BERT tokenizer now supports slow-tokenizer mode even if the `tokenizers` wheel is absent.
+- Single-GPU training can now run with plain `python train.py`; multi-GPU training still uses `torchrun`.
 
 ## Expected dataset layout
 The repository root is assumed to be `LAVT-RIS/`, and the dataset is assumed to live beside it:
@@ -55,10 +56,29 @@ This repository still expects external weights and does not track them in Git:
 - BERT weights/tokenizer: keep using `bert-base-uncased` with internet access, or pass a local HuggingFace-style directory to both `--ck_bert` and `--bert_tokenizer`
 
 ## Train on Linux
-Use `torchrun` even on a single GPU:
+Use plain `python` on a single GPU:
 
 ```bash
-torchrun --standalone --nproc_per_node=1 train.py \
+python train.py \
+  --model lavt \
+  --model_id local_json_run \
+  --dataset_root ../dataset \
+  --train_json train.json \
+  --test_json test.json \
+  --batch-size 4 \
+  --lr 5e-5 \
+  --wd 1e-2 \
+  --swin_type base \
+  --pretrained_swin_weights ./pretrained_weights/swin_base_patch4_window12_384_22k.pth \
+  --epochs 40 \
+  --img_size 480 \
+  --pin_mem
+```
+
+Use `torchrun` only when `nproc_per_node > 1`:
+
+```bash
+torchrun --standalone --nproc_per_node=4 train.py \
   --model lavt \
   --model_id local_json_run \
   --dataset_root ../dataset \
@@ -78,10 +98,10 @@ Training saves:
 - `./checkpoints/checkpoint_last_<model_id>.pth`: latest resumable checkpoint
 - `./checkpoints/model_final_<model_id>.pth`: final checkpoint after training
 
-Resume training:
+Resume training on a single GPU:
 
 ```bash
-torchrun --standalone --nproc_per_node=1 train.py \
+python train.py \
   --model lavt \
   --model_id local_json_run \
   --dataset_root ../dataset \
