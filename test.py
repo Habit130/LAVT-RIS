@@ -30,17 +30,56 @@ def get_dataset(image_set, transform, args):
     return ds, num_classes
 
 
+def safe_divide(numerator, denominator):
+    if denominator == 0:
+        return 0.0
+    return float(numerator) / float(denominator)
+
+
+def compute_binary_stats(pred_seg, gt_seg):
+    pred_fg = pred_seg.astype(bool)
+    gt_fg = gt_seg.astype(bool)
+
+    tp = np.logical_and(pred_fg, gt_fg).sum(dtype=np.int64)
+    fp = np.logical_and(pred_fg, np.logical_not(gt_fg)).sum(dtype=np.int64)
+    fn = np.logical_and(np.logical_not(pred_fg), gt_fg).sum(dtype=np.int64)
+    tn = np.logical_and(np.logical_not(pred_fg), np.logical_not(gt_fg)).sum(dtype=np.int64)
+
+    return tp, fp, fn, tn
+
+
+def summarize_metrics(tp, fp, fn, tn):
+    iou_fg = safe_divide(tp, tp + fp + fn)
+    dice = safe_divide(2 * tp, 2 * tp + fp + fn)
+    recall = safe_divide(tp, tp + fn)
+    iou_bg = safe_divide(tn, tn + fn + fp)
+    m_iou = (iou_fg + iou_bg) / 2.0
+    acc_fg = safe_divide(tp, tp + fn)
+    acc_bg = safe_divide(tn, tn + fp)
+    m_acc = (acc_fg + acc_bg) / 2.0
+
+    return {
+        'IoU': iou_fg,
+        'Dice': dice,
+        'Recall': recall,
+        'mIoU': m_iou,
+        'mACC': m_acc,
+        'TP': int(tp),
+        'FP': int(fp),
+        'FN': int(fn),
+        'TN': int(tn),
+    }
+
+
 def evaluate(model, data_loader, bert_model, device):
     model.eval()
     metric_logger = utils.MetricLogger(delimiter="  ")
-
-    # evaluation variables
-    cum_I, cum_U = 0, 0
-    eval_seg_iou_list = [.5, .6, .7, .8, .9]
-    seg_correct = np.zeros(len(eval_seg_iou_list), dtype=np.int32)
-    seg_total = 0
-    mean_IoU = []
     header = 'Test:'
+
+    total_tp = 0
+    total_fp = 0
+    total_fn = 0
+    total_tn = 0
 
     with torch.no_grad():
         for data in metric_logger.log_every(data_loader, 100, header):
@@ -49,7 +88,7 @@ def evaluate(model, data_loader, bert_model, device):
                                                    sentences.to(device), attentions.to(device)
             sentences = sentences.squeeze(1)
             attentions = attentions.squeeze(1)
-            target = target.cpu().data.numpy()
+            target_np = target.cpu().data.numpy()
             for j in range(sentences.size(-1)):
                 if bert_model is not None:
                     last_hidden_states = bert_model(sentences[:, :, j], attention_mask=attentions[:, :, j])[0]
@@ -60,33 +99,28 @@ def evaluate(model, data_loader, bert_model, device):
 
                 output = output.cpu()
                 output_mask = output.argmax(1).data.numpy()
-                I, U = computeIoU(output_mask, target)
-                if U == 0:
-                    this_iou = 0.0
-                else:
-                    this_iou = I*1.0/U
-                mean_IoU.append(this_iou)
-                cum_I += I
-                cum_U += U
-                for n_eval_iou in range(len(eval_seg_iou_list)):
-                    eval_seg_iou = eval_seg_iou_list[n_eval_iou]
-                    seg_correct[n_eval_iou] += (this_iou >= eval_seg_iou)
-                seg_total += 1
+                tp, fp, fn, tn = compute_binary_stats(output_mask, target_np)
+                total_tp += tp
+                total_fp += fp
+                total_fn += fn
+                total_tn += tn
 
             del image, target, sentences, attentions, output, output_mask
             if bert_model is not None:
                 del last_hidden_states, embedding
 
-    mean_IoU = np.array(mean_IoU)
-    mIoU = np.mean(mean_IoU)
+    metrics = summarize_metrics(total_tp, total_fp, total_fn, total_tn)
     print('Final results:')
-    print('Mean IoU is %.2f\n' % (mIoU*100.))
-    results_str = ''
-    for n_eval_iou in range(len(eval_seg_iou_list)):
-        results_str += '    precision@%s = %.2f\n' % \
-                       (str(eval_seg_iou_list[n_eval_iou]), seg_correct[n_eval_iou] * 100. / seg_total)
-    results_str += '    overall IoU = %.2f\n' % (cum_I * 100. / cum_U)
-    print(results_str)
+    print('    TP = {}'.format(metrics['TP']))
+    print('    FP = {}'.format(metrics['FP']))
+    print('    FN = {}'.format(metrics['FN']))
+    print('    TN = {}'.format(metrics['TN']))
+    print('    IoU = {:.2f}'.format(metrics['IoU'] * 100.0))
+    print('    Dice = {:.2f}'.format(metrics['Dice'] * 100.0))
+    print('    Recall = {:.2f}'.format(metrics['Recall'] * 100.0))
+    print('    mIoU = {:.2f}'.format(metrics['mIoU'] * 100.0))
+    print('    mACC = {:.2f}'.format(metrics['mACC'] * 100.0))
+
 
 
 def get_transform(args):
@@ -97,12 +131,6 @@ def get_transform(args):
 
     return T.Compose(transforms)
 
-
-def computeIoU(pred_seg, gd_seg):
-    I = np.sum(np.logical_and(pred_seg, gd_seg))
-    U = np.sum(np.logical_or(pred_seg, gd_seg))
-
-    return I, U
 
 
 def main(args):
