@@ -52,6 +52,13 @@ class args:
     window12 = True
     mha = ''
     fusion_drop = 0.0
+    use_vgtr = True
+    vgtr_source_stage = 4
+    vgtr_hidden_dim = 768
+    vgtr_gate_type = 'token_scalar'
+    vgtr_lambda_init = 0.0
+    vgtr_use_layernorm = True
+    vgtr_debug = False
 
 
 single_model = segmentation.__dict__['lavt'](pretrained='', args=args)
@@ -62,7 +69,8 @@ single_bert_model.pooler = None
 
 checkpoint = torch.load(weights, map_location='cpu')
 single_bert_model.load_state_dict(checkpoint['bert_model'])
-single_model.load_state_dict(checkpoint['model'])
+from utils import load_state_dict_with_fallback
+load_state_dict_with_fallback(single_model, checkpoint['model'], strict=False, module_name='model')
 model = single_model.to(device)
 bert_model = single_bert_model.to(device)
 

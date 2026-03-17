@@ -164,7 +164,7 @@ def main(args):
 
     if args.resume:
         checkpoint = torch.load(args.resume, map_location='cpu')
-        single_model.load_state_dict(checkpoint['model'])
+        utils.load_state_dict_with_fallback(single_model, checkpoint['model'], strict=False, module_name='model')
         if args.model != 'lavt_one':
             single_bert_model.load_state_dict(checkpoint['bert_model'])
 
@@ -196,6 +196,11 @@ def main(args):
                 [[p for p in single_model.text_encoder.encoder.layer[i].parameters() if p.requires_grad] for i in range(10)],
             )},
         ]
+
+    if hasattr(single_model, 'vgtr') and single_model.vgtr is not None:
+        vgtr_params = [p for p in single_model.vgtr.parameters() if p.requires_grad]
+        if vgtr_params:
+            params_to_optimize.append({'params': vgtr_params})
 
     optimizer = torch.optim.AdamW(
         params_to_optimize,

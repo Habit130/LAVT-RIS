@@ -61,7 +61,7 @@ def _segm_lavt(pretrained, args):
     classifier = model_map[0](8*embed_dim)
     base_model = model_map[1]
 
-    model = base_model(backbone, classifier)
+    model = base_model(backbone, classifier, args)
     return model
 
 

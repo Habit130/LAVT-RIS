@@ -202,6 +202,22 @@ def save_on_master(*args, **kwargs):
         torch.save(*args, **kwargs)
 
 
+def load_state_dict_with_fallback(module, state_dict, strict=False, module_name='model'):
+    load_result = module.load_state_dict(state_dict, strict=strict)
+    if isinstance(load_result, tuple):
+        missing_keys, unexpected_keys = load_result
+    else:
+        missing_keys = load_result.missing_keys
+        unexpected_keys = load_result.unexpected_keys
+
+    if missing_keys:
+        print('Missing keys while loading {}: {}'.format(module_name, ', '.join(missing_keys)))
+    if unexpected_keys:
+        print('Unexpected keys while loading {}: {}'.format(module_name, ', '.join(unexpected_keys)))
+
+    return missing_keys, unexpected_keys
+
+
 def init_distributed_mode(args):
     args.distributed = False
 

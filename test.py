@@ -142,7 +142,7 @@ def main(args):
     print(args.model)
     single_model = segmentation.__dict__[args.model](pretrained='',args=args)
     checkpoint = torch.load(args.resume, map_location='cpu')
-    single_model.load_state_dict(checkpoint['model'])
+    utils.load_state_dict_with_fallback(single_model, checkpoint['model'], strict=False, module_name='model')
     model = single_model.to(device)
 
     if args.model != 'lavt_one':

@@ -47,6 +47,24 @@ def get_parser():
                         help='maximum number of BERT tokens kept for each caption')
     parser.add_argument('--train_json', default='train.json',
                         help='train split annotation file relative to dataset_root')
+    parser.add_argument('--use_vgtr', dest='use_vgtr', action='store_true',
+                        help='enable visual-guided token reweighting before PWAM')
+    parser.add_argument('--no_vgtr', dest='use_vgtr', action='store_false',
+                        help='disable visual-guided token reweighting and use original LAVT behavior')
+    parser.add_argument('--vgtr_source_stage', default=4, type=int, choices=[1, 2, 3, 4],
+                        help='visual stage used to build the global visual summary for VGTR')
+    parser.add_argument('--vgtr_hidden_dim', default=768, type=int,
+                        help='hidden dimension used by the VGTR token gate')
+    parser.add_argument('--vgtr_gate_type', default='token_scalar', choices=['token_scalar'],
+                        help='VGTR gate type')
+    parser.add_argument('--vgtr_lambda_init', default=0.0, type=float,
+                        help='initial residual scaling factor for VGTR')
+    parser.add_argument('--vgtr_use_layernorm', dest='vgtr_use_layernorm', action='store_true',
+                        help='apply layer normalization to text and visual projections inside VGTR')
+    parser.add_argument('--no_vgtr_layernorm', dest='vgtr_use_layernorm', action='store_false',
+                        help='disable layer normalization inside VGTR')
+    parser.add_argument('--vgtr_debug', action='store_true',
+                        help='print VGTR debug statistics during forward passes')
     parser.add_argument('--wd', '--weight-decay', default=1e-2, type=float, metavar='W', help='weight decay',
                         dest='weight_decay')
     parser.add_argument('--window12', action='store_true',
@@ -54,6 +72,8 @@ def get_parser():
                              'when training, window size is inferred from pre-trained weights file name'
                              '(containing \'window12\'). Initialize Swin with window size 12 instead of the default 7.')
     parser.add_argument('-j', '--workers', default=8, type=int, metavar='N', help='number of data loading workers')
+
+    parser.set_defaults(use_vgtr=True, vgtr_use_layernorm=True)
 
     return parser
 

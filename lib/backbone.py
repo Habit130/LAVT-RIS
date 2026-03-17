@@ -485,6 +485,31 @@ class MultiModalSwinTransformer(nn.Module):
 
         return tuple(outs)
 
+    def forward_visual_features(self, x):
+        """Extract visual-only hierarchical Swin features for VGTR guidance."""
+        x = self.patch_embed(x)
+
+        Wh, Ww = x.size(2), x.size(3)
+        if self.ape:
+            absolute_pos_embed = F.interpolate(self.absolute_pos_embed, size=(Wh, Ww), mode='bicubic')
+            x = (x + absolute_pos_embed).flatten(2).transpose(1, 2)
+        else:
+            x = x.flatten(2).transpose(1, 2)
+        x = self.pos_drop(x)
+
+        outs = []
+        for i in range(self.num_layers):
+            layer = self.layers[i]
+            x_out, H, W, x, Wh, Ww = layer.forward_visual_only(x, Wh, Ww)
+
+            if i in self.out_indices:
+                norm_layer = getattr(self, f'norm{i}')
+                x_out = norm_layer(x_out)
+                out = x_out.view(-1, H, W, self.num_features[i]).permute(0, 3, 1, 2).contiguous()
+                outs.append(out)
+
+        return tuple(outs)
+
     def train(self, mode=True):
         """Convert the model into training mode while keep layers freezed."""
         super(MultiModalSwinTransformer, self).train(mode)
@@ -553,6 +578,50 @@ class MMBasicLayer(nn.Module):
         else:
             self.downsample = None
 
+    def _build_attn_mask(self, H, W, device):
+        Hp = int(np.ceil(H / self.window_size)) * self.window_size
+        Wp = int(np.ceil(W / self.window_size)) * self.window_size
+        img_mask = torch.zeros((1, Hp, Wp, 1), device=device)
+        h_slices = (
+            slice(0, -self.window_size),
+            slice(-self.window_size, -self.shift_size),
+            slice(-self.shift_size, None),
+        )
+        w_slices = (
+            slice(0, -self.window_size),
+            slice(-self.window_size, -self.shift_size),
+            slice(-self.shift_size, None),
+        )
+        cnt = 0
+        for h in h_slices:
+            for w in w_slices:
+                img_mask[:, h, w, :] = cnt
+                cnt += 1
+
+        mask_windows = window_partition(img_mask, self.window_size)
+        mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
+        attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
+        attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
+        return attn_mask
+
+    def forward_visual_only(self, x, H, W):
+        """Run the Swin stage without language fusion for global visual summary extraction."""
+        attn_mask = self._build_attn_mask(H, W, x.device)
+
+        for blk in self.blocks:
+            blk.H, blk.W = H, W
+            if self.use_checkpoint:
+                x = checkpoint.checkpoint(blk, x, attn_mask)
+            else:
+                x = blk(x, attn_mask)
+
+        x_visual = x
+        if self.downsample is not None:
+            x_down = self.downsample(x_visual, H, W)
+            Wh, Ww = (H + 1) // 2, (W + 1) // 2
+            return x_visual, H, W, x_down, Wh, Ww
+        return x_visual, H, W, x_visual, H, W
+
     def forward(self, x, H, W, l, l_mask):
         """ Forward function.
 
@@ -561,26 +630,7 @@ class MMBasicLayer(nn.Module):
             H, W: Spatial resolution of the input feature.
         """
 
-        # calculate attention mask for SW-MSA
-        Hp = int(np.ceil(H / self.window_size)) * self.window_size
-        Wp = int(np.ceil(W / self.window_size)) * self.window_size
-        img_mask = torch.zeros((1, Hp, Wp, 1), device=x.device)  # 1 Hp Wp 1
-        h_slices = (slice(0, -self.window_size),
-                    slice(-self.window_size, -self.shift_size),
-                    slice(-self.shift_size, None))
-        w_slices = (slice(0, -self.window_size),
-                    slice(-self.window_size, -self.shift_size),
-                    slice(-self.shift_size, None))
-        cnt = 0
-        for h in h_slices:
-            for w in w_slices:
-                img_mask[:, h, w, :] = cnt
-                cnt += 1
-
-        mask_windows = window_partition(img_mask, self.window_size)  # nW, window_size, window_size, 1
-        mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
-        attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
-        attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
+        attn_mask = self._build_attn_mask(H, W, x.device)
 
         for blk in self.blocks:
             blk.H, blk.W = H, W
