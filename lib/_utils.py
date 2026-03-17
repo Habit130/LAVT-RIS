@@ -37,13 +37,12 @@ class _LAVTSimpleDecode(nn.Module):
         else:
             self.vgtr = None
 
-    def _apply_vgtr(self, image, text_feats, text_mask):
+    def _apply_vgtr(self, text_feats, text_mask, visual_feature_maps):
         if self.vgtr is None:
             self.last_vgtr_debug = None
             return text_feats
 
-        visual_stages = self.backbone.forward_visual_features(image)
-        source_feature = visual_stages[self.vgtr_source_stage - 1]
+        source_feature = visual_feature_maps[self.vgtr_source_stage - 1]
         global_visual_feat = source_feature.mean(dim=(2, 3))
         reweighted_text_feats = self.vgtr(text_feats, global_visual_feat, text_mask=text_mask)
         self.last_vgtr_debug = dict(self.vgtr.last_debug)
@@ -66,9 +65,14 @@ class _LAVTSimpleDecode(nn.Module):
         input_shape = x.shape[-2:]
         text_mask = l_mask.squeeze(-1) if l_mask.ndim == 3 else l_mask
         text_feats = l_feats.permute(0, 2, 1)
-        text_feats = self._apply_vgtr(x, text_feats, text_mask=text_mask)
-        l_feats = text_feats.permute(0, 2, 1)
-        features = self.backbone(x, l_feats, l_mask)
+        if self.vgtr is not None:
+            visual_states, visual_feature_maps = self.backbone.extract_visual_states(x)
+            text_feats = self._apply_vgtr(text_feats, text_mask=text_mask, visual_feature_maps=visual_feature_maps)
+            l_feats = text_feats.permute(0, 2, 1)
+            features = self.backbone.forward_from_visual_states(visual_states, l_feats, l_mask)
+        else:
+            l_feats = text_feats.permute(0, 2, 1)
+            features = self.backbone(x, l_feats, l_mask)
         x_c1, x_c2, x_c3, x_c4 = features
         x = self.classifier(x_c4, x_c3, x_c2, x_c1)
         x = F.interpolate(x, size=input_shape, mode='bilinear', align_corners=True)
@@ -114,13 +118,12 @@ class _LAVTOneSimpleDecode(nn.Module):
         else:
             self.vgtr = None
 
-    def _apply_vgtr(self, image, text_feats, text_mask):
+    def _apply_vgtr(self, text_feats, text_mask, visual_feature_maps):
         if self.vgtr is None:
             self.last_vgtr_debug = None
             return text_feats
 
-        visual_stages = self.backbone.forward_visual_features(image)
-        source_feature = visual_stages[self.vgtr_source_stage - 1]
+        source_feature = visual_feature_maps[self.vgtr_source_stage - 1]
         global_visual_feat = source_feature.mean(dim=(2, 3))
         reweighted_text_feats = self.vgtr(text_feats, global_visual_feat, text_mask=text_mask)
         self.last_vgtr_debug = dict(self.vgtr.last_debug)
@@ -144,11 +147,17 @@ class _LAVTOneSimpleDecode(nn.Module):
         ### language inference ###
         text_mask = l_mask
         l_feats = self.text_encoder(text, attention_mask=l_mask)[0]  # (B, N_l, 768)
-        l_feats = self._apply_vgtr(x, l_feats, text_mask=text_mask)
-        l_feats = l_feats.permute(0, 2, 1)  # (B, 768, N_l) to make Conv1d happy
-        l_mask = l_mask.unsqueeze(dim=-1)  # (batch, N_l, 1)
+        if self.vgtr is not None:
+            visual_states, visual_feature_maps = self.backbone.extract_visual_states(x)
+            l_feats = self._apply_vgtr(l_feats, text_mask=text_mask, visual_feature_maps=visual_feature_maps)
+            l_feats = l_feats.permute(0, 2, 1)  # (B, 768, N_l) to make Conv1d happy
+            l_mask = l_mask.unsqueeze(dim=-1)  # (batch, N_l, 1)
+            features = self.backbone.forward_from_visual_states(visual_states, l_feats, l_mask)
+        else:
+            l_feats = l_feats.permute(0, 2, 1)  # (B, 768, N_l) to make Conv1d happy
+            l_mask = l_mask.unsqueeze(dim=-1)  # (batch, N_l, 1)
+            features = self.backbone(x, l_feats, l_mask)
         ##########################
-        features = self.backbone(x, l_feats, l_mask)
         x_c1, x_c2, x_c3, x_c4 = features
         x = self.classifier(x_c4, x_c3, x_c2, x_c1)
         x = F.interpolate(x, size=input_shape, mode='bilinear', align_corners=True)

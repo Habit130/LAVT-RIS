@@ -458,35 +458,7 @@ class MultiModalSwinTransformer(nn.Module):
         else:
             raise TypeError('pretrained must be a str or None')
 
-    def forward(self, x, l, l_mask):
-        """Forward function."""
-        x = self.patch_embed(x)
-
-        Wh, Ww = x.size(2), x.size(3)
-        if self.ape:
-            # interpolate the position embedding to the corresponding size
-            absolute_pos_embed = F.interpolate(self.absolute_pos_embed, size=(Wh, Ww), mode='bicubic')
-            x = (x + absolute_pos_embed).flatten(2).transpose(1, 2)  # B Wh*Ww C
-        else:
-            x = x.flatten(2).transpose(1, 2)
-        x = self.pos_drop(x)
-
-        outs = []
-        for i in range(self.num_layers):
-            layer = self.layers[i]
-            x_out, H, W, x, Wh, Ww = layer(x, Wh, Ww, l, l_mask)
-
-            if i in self.out_indices:
-                norm_layer = getattr(self, f'norm{i}')
-                x_out = norm_layer(x_out)  # output of a Block has shape (B, H*W, dim)
-
-                out = x_out.view(-1, H, W, self.num_features[i]).permute(0, 3, 1, 2).contiguous()
-                outs.append(out)
-
-        return tuple(outs)
-
-    def forward_visual_features(self, x):
-        """Extract visual-only hierarchical Swin features for VGTR guidance."""
+    def _forward_patch_embedding(self, x):
         x = self.patch_embed(x)
 
         Wh, Ww = x.size(2), x.size(3)
@@ -496,19 +468,78 @@ class MultiModalSwinTransformer(nn.Module):
         else:
             x = x.flatten(2).transpose(1, 2)
         x = self.pos_drop(x)
+        return x, Wh, Ww
+
+    def _tokens_to_feature_map(self, stage_index, stage_tokens, height, width):
+        norm_layer = getattr(self, f'norm{stage_index}', None)
+        if norm_layer is not None:
+            stage_tokens = norm_layer(stage_tokens)
+        return stage_tokens.view(-1, height, width, self.num_features[stage_index]).permute(0, 3, 1, 2).contiguous()
+
+    def extract_visual_states(self, x):
+        """Run the hierarchical Swin encoder once and keep visual-only stage states.
+
+        Returns:
+            visual_states: one dict per stage with visual tokens and spatial size.
+            visual_feature_maps: normalized stage feature maps shaped [B, C_i, H_i, W_i].
+        """
+        x, Wh, Ww = self._forward_patch_embedding(x)
+
+        visual_states = []
+        visual_feature_maps = []
+        for i in range(self.num_layers):
+            layer = self.layers[i]
+            stage_tokens, H, W, x, Wh, Ww = layer.forward_visual_only(x, Wh, Ww)
+            visual_states.append({
+                'stage_tokens': stage_tokens,
+                'height': H,
+                'width': W,
+            })
+            visual_feature_maps.append(self._tokens_to_feature_map(i, stage_tokens, H, W))
+
+        return visual_states, tuple(visual_feature_maps)
+
+    def forward_from_visual_states(self, visual_states, l, l_mask):
+        """Fuse precomputed visual stage states with language without rerunning Swin blocks."""
+        if len(visual_states) != self.num_layers:
+            raise AssertionError(
+                f'Expected {self.num_layers} visual states, got {len(visual_states)}'
+            )
 
         outs = []
         for i in range(self.num_layers):
             layer = self.layers[i]
-            x_out, H, W, x, Wh, Ww = layer.forward_visual_only(x, Wh, Ww)
+            stage_state = visual_states[i]
+            stage_tokens = stage_state['stage_tokens']
+            H = stage_state['height']
+            W = stage_state['width']
+            x_out = layer.forward_fusion_only(stage_tokens, l, l_mask)
 
             if i in self.out_indices:
-                norm_layer = getattr(self, f'norm{i}')
-                x_out = norm_layer(x_out)
-                out = x_out.view(-1, H, W, self.num_features[i]).permute(0, 3, 1, 2).contiguous()
+                out = self._tokens_to_feature_map(i, x_out, H, W)
                 outs.append(out)
 
         return tuple(outs)
+
+    def forward(self, x, l, l_mask):
+        """Forward function."""
+        x, Wh, Ww = self._forward_patch_embedding(x)
+
+        outs = []
+        for i in range(self.num_layers):
+            layer = self.layers[i]
+            x_out, H, W, x, Wh, Ww = layer(x, Wh, Ww, l, l_mask)
+
+            if i in self.out_indices:
+                out = self._tokens_to_feature_map(i, x_out, H, W)
+                outs.append(out)
+
+        return tuple(outs)
+
+    def forward_visual_features(self, x):
+        """Extract visual-only hierarchical Swin features for VGTR guidance."""
+        _, visual_feature_maps = self.extract_visual_states(x)
+        return visual_feature_maps
 
     def train(self, mode=True):
         """Convert the model into training mode while keep layers freezed."""
@@ -621,6 +652,10 @@ class MMBasicLayer(nn.Module):
             Wh, Ww = (H + 1) // 2, (W + 1) // 2
             return x_visual, H, W, x_down, Wh, Ww
         return x_visual, H, W, x_visual, H, W
+
+    def forward_fusion_only(self, x_visual, l, l_mask):
+        """Apply PWAM on cached visual tokens from the visual encoder."""
+        return self.fusion(x_visual, l, l_mask)
 
     def forward(self, x, H, W, l, l_mask):
         """ Forward function.
