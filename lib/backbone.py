@@ -351,7 +351,9 @@ class MultiModalSwinTransformer(nn.Module):
                  frozen_stages=-1,
                  use_checkpoint=False,
                  num_heads_fusion=[1, 1, 1, 1],
-                 fusion_drop=0.0
+                 fusion_drop=0.0,
+                 use_tgvr_stage4=False,
+                 tgvr_init_alpha=0.0
                  ):
         super().__init__()
 
@@ -400,7 +402,11 @@ class MultiModalSwinTransformer(nn.Module):
                 downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
                 use_checkpoint=use_checkpoint,
                 num_heads_fusion=num_heads_fusion[i_layer],
-                fusion_drop=fusion_drop
+                fusion_drop=fusion_drop,
+                use_tgvr_stage4=use_tgvr_stage4,
+                tgvr_init_alpha=tgvr_init_alpha,
+                is_stage4=(i_layer == 3),
+                text_dim=768
             )
             self.layers.append(layer)
 
@@ -507,7 +513,11 @@ class MMBasicLayer(nn.Module):
                  downsample=None,
                  use_checkpoint=False,
                  num_heads_fusion=1,
-                 fusion_drop=0.0
+                 fusion_drop=0.0,
+                 use_tgvr_stage4=False,
+                 tgvr_init_alpha=0.0,
+                 is_stage4=False,
+                 text_dim=768
                  ):
         super().__init__()
         self.window_size = window_size
@@ -515,6 +525,7 @@ class MMBasicLayer(nn.Module):
         self.depth = depth
         self.use_checkpoint = use_checkpoint
         self.dim = dim
+        self.tgvr_stage4 = None
 
         # build blocks
         self.blocks = nn.ModuleList([
@@ -547,6 +558,12 @@ class MMBasicLayer(nn.Module):
             nn.Linear(dim, dim, bias=False),
             nn.Tanh()
         )
+        if use_tgvr_stage4 and is_stage4:
+            self.tgvr_stage4 = TextGuidedVisualRecalibration(
+                text_dim=text_dim,
+                visual_dim=dim,
+                init_alpha=tgvr_init_alpha,
+            )
         # patch merging layer
         if downsample is not None:
             self.downsample = downsample(dim=dim, norm_layer=norm_layer)
@@ -588,6 +605,14 @@ class MMBasicLayer(nn.Module):
                 x = checkpoint.checkpoint(blk, x, attn_mask)
             else:
                 x = blk(x, attn_mask)  # output of a Block has shape (B, H*W, dim)
+
+        if self.tgvr_stage4 is not None:
+            batch_size = x.size(0)
+            # x: [B, H*W, C] -> visual_feat: [B, C, H, W] for stage4-only TGVR.
+            visual_feat = x.reshape(batch_size, H, W, self.dim).permute(0, 3, 1, 2).contiguous()
+            visual_feat = self.tgvr_stage4(visual_feat, l, l_mask)
+            # PWAM still consumes the original token-level text features l and l_mask.
+            x = visual_feat.permute(0, 2, 3, 1).reshape(batch_size, H * W, self.dim).contiguous()
 
         # PWAM fusion
         x_residual = self.fusion(x, l, l_mask)
@@ -637,6 +662,54 @@ class PWAM(nn.Module):
         mm = mm.permute(0, 2, 1)  # (B, H*W, dim)
 
         return mm
+
+
+class TextGuidedVisualRecalibration(nn.Module):
+    """Stage4-only TGVR.
+
+    Inputs:
+        visual_feat: [B, C_v, H, W]
+        text_feat: [B, C_t, T] or [B, T, C_t]
+        text_mask: [B, T], [B, T, 1], or [B, 1, T]
+    Output:
+        recalibrated_visual_feat: [B, C_v, H, W]
+    """
+
+    def __init__(self, text_dim, visual_dim, init_alpha=0.0):
+        super().__init__()
+        self.text_dim = text_dim
+        self.visual_dim = visual_dim
+        self.text_proj = nn.Linear(text_dim, visual_dim)
+        self.alpha = nn.Parameter(torch.tensor(init_alpha))
+
+    def forward(self, visual_feat, text_feat, text_mask):
+        if text_feat.dim() != 3:
+            raise ValueError('text_feat is expected to be a 3D tensor')
+
+        if text_feat.size(1) == self.text_dim:
+            text_tokens = text_feat.permute(0, 2, 1)
+        elif text_feat.size(2) == self.text_dim:
+            text_tokens = text_feat
+        else:
+            raise ValueError('text_feat does not match the configured text_dim')
+
+        if text_mask.dim() == 2:
+            mask = text_mask.unsqueeze(-1)
+        elif text_mask.dim() == 3 and text_mask.size(-1) == 1:
+            mask = text_mask
+        elif text_mask.dim() == 3 and text_mask.size(1) == 1:
+            mask = text_mask.transpose(1, 2)
+        else:
+            raise ValueError('text_mask is expected to have shape [B, T], [B, T, 1], or [B, 1, T]')
+
+        mask = mask.to(dtype=text_tokens.dtype)
+        denom = mask.sum(dim=1).clamp(min=1.0)
+        global_text = (text_tokens * mask).sum(dim=1) / denom  # [B, C_t]
+        scale = torch.sigmoid(self.text_proj(global_text)).to(dtype=visual_feat.dtype)  # [B, C_v]
+        scale = scale.unsqueeze(-1).unsqueeze(-1)  # [B, C_v, 1, 1]
+        alpha = self.alpha.to(dtype=visual_feat.dtype)
+
+        return visual_feat + alpha * (scale * visual_feat)
 
 
 class SpatialImageLanguageAttention(nn.Module):

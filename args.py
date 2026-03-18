@@ -45,8 +45,12 @@ def get_parser():
                         help='test split annotation file relative to dataset_root')
     parser.add_argument('--text_max_tokens', default=20, type=int,
                         help='maximum number of BERT tokens kept for each caption')
+    parser.add_argument('--tgvr_init_alpha', default=0.0, type=float,
+                        help='initial residual scaling factor for the optional stage4 TGVR module')
     parser.add_argument('--train_json', default='train.json',
                         help='train split annotation file relative to dataset_root')
+    parser.add_argument('--use_tgvr_stage4', action='store_true',
+                        help='enable the optional Text-Guided Visual Recalibration module before stage4 PWAM')
     parser.add_argument('--wd', '--weight-decay', default=1e-2, type=float, metavar='W', help='weight decay',
                         dest='weight_decay')
     parser.add_argument('--window12', action='store_true',

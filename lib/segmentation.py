@@ -47,7 +47,9 @@ def _segm_lavt(pretrained, args):
                                          ape=False, drop_path_rate=0.3, patch_norm=True,
                                          out_indices=out_indices,
                                          use_checkpoint=False, num_heads_fusion=mha,
-                                         fusion_drop=args.fusion_drop
+                                         fusion_drop=args.fusion_drop,
+                                         use_tgvr_stage4=getattr(args, 'use_tgvr_stage4', False),
+                                         tgvr_init_alpha=getattr(args, 'tgvr_init_alpha', 0.0)
                                          )
     if pretrained:
         print('Initializing Multi-modal Swin Transformer weights from ' + pretrained)
@@ -116,7 +118,9 @@ def _segm_lavt_one(pretrained, args):
                                          ape=False, drop_path_rate=0.3, patch_norm=True,
                                          out_indices=out_indices,
                                          use_checkpoint=False, num_heads_fusion=mha,
-                                         fusion_drop=args.fusion_drop
+                                         fusion_drop=args.fusion_drop,
+                                         use_tgvr_stage4=getattr(args, 'use_tgvr_stage4', False),
+                                         tgvr_init_alpha=getattr(args, 'tgvr_init_alpha', 0.0)
                                          )
     if pretrained:
         print('Initializing Multi-modal Swin Transformer weights from ' + pretrained)
