@@ -54,13 +54,22 @@ class args:
     fusion_drop = 0.0
 
 
+def sync_decoder_args_from_checkpoint(args_cls, checkpoint_args):
+    if checkpoint_args is None:
+        return
+    for name in ['decoder_head', 'use_boundary_refine', 'boundary_loss_weight', 'boundary_alpha']:
+        if hasattr(checkpoint_args, name):
+            setattr(args_cls, name, getattr(checkpoint_args, name))
+
+
+checkpoint = torch.load(weights, map_location='cpu')
+sync_decoder_args_from_checkpoint(args, checkpoint.get('args'))
 single_model = segmentation.__dict__['lavt'](pretrained='', args=args)
 single_model.to(device)
 model_class = BertModel
 single_bert_model = model_class.from_pretrained('bert-base-uncased')
 single_bert_model.pooler = None
 
-checkpoint = torch.load(weights, map_location='cpu')
 single_bert_model.load_state_dict(checkpoint['bert_model'])
 single_model.load_state_dict(checkpoint['model'])
 model = single_model.to(device)

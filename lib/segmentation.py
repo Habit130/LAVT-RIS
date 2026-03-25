@@ -1,10 +1,24 @@
 import torch
 import torch.nn as nn
-from .mask_predictor import SimpleDecoding
+from .mask_predictor import DiseaseAwareRefinementHead, SimpleDecoding
 from .backbone import MultiModalSwinTransformer
 from ._utils import LAVT, LAVTOne
 
 __all__ = ['lavt', 'lavt_one']
+
+
+def _build_classifier(args, embed_dim):
+    head_name = getattr(args, 'decoder_head', 'simple')
+    if head_name == 'simple':
+        return SimpleDecoding(8 * embed_dim)
+    if head_name == 'disease_aware':
+        return DiseaseAwareRefinementHead(
+            8 * embed_dim,
+            use_boundary_refine=getattr(args, 'use_boundary_refine', False),
+            boundary_loss_weight=getattr(args, 'boundary_loss_weight', 0.0),
+            boundary_alpha=getattr(args, 'boundary_alpha', 0.1),
+        )
+    raise ValueError('Unsupported decoder head: {}'.format(head_name))
 
 
 # LAVT
@@ -56,10 +70,8 @@ def _segm_lavt(pretrained, args):
         print('Randomly initialize Multi-modal Swin Transformer weights.')
         backbone.init_weights()
 
-    model_map = [SimpleDecoding, LAVT]
-
-    classifier = model_map[0](8*embed_dim)
-    base_model = model_map[1]
+    classifier = _build_classifier(args, embed_dim)
+    base_model = LAVT
 
     model = base_model(backbone, classifier)
     return model
@@ -125,10 +137,8 @@ def _segm_lavt_one(pretrained, args):
         print('Randomly initialize Multi-modal Swin Transformer weights.')
         backbone.init_weights()
 
-    model_map = [SimpleDecoding, LAVTOne]
-
-    classifier = model_map[0](8*embed_dim)
-    base_model = model_map[1]
+    classifier = _build_classifier(args, embed_dim)
+    base_model = LAVTOne
 
     model = base_model(backbone, classifier, args)
     return model

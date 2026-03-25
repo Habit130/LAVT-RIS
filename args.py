@@ -14,6 +14,8 @@ def get_parser():
                         help='dataset tag used for experiment naming; data is read from local JSON splits')
     parser.add_argument('--dataset_root', default='../dataset',
                         help='root directory containing split JSON files and referenced image/mask paths')
+    parser.add_argument('--decoder_head', default='simple',
+                        help='segmentation head: simple or disease_aware')
     parser.add_argument('--ddp_trained_weights', action='store_true',
                         help='Only needs specified when testing,'
                              'whether the weights to be loaded are from a DDP-trained model')
@@ -47,6 +49,12 @@ def get_parser():
                         help='maximum number of BERT tokens kept for each caption')
     parser.add_argument('--train_json', default='train.json',
                         help='train split annotation file relative to dataset_root')
+    parser.add_argument('--use_boundary_refine', action='store_true',
+                        help='enable the boundary branch inside the disease-aware decoder to refine foreground logits')
+    parser.add_argument('--boundary_loss_weight', default=0.0, type=float,
+                        help='optional auxiliary loss weight for boundary supervision; disabled when set to 0')
+    parser.add_argument('--boundary_alpha', default=0.1, type=float,
+                        help='initial boundary refinement scale for the disease-aware decoder')
     parser.add_argument('--wd', '--weight-decay', default=1e-2, type=float, metavar='W', help='weight decay',
                         dest='weight_decay')
     parser.add_argument('--window12', action='store_true',

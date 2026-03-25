@@ -132,6 +132,21 @@ def get_transform(args):
     return T.Compose(transforms)
 
 
+def sync_decoder_args_from_checkpoint(args, checkpoint_args):
+    if checkpoint_args is None:
+        return
+    for name in ['decoder_head', 'use_boundary_refine', 'boundary_loss_weight', 'boundary_alpha']:
+        if hasattr(checkpoint_args, name):
+            current_value = getattr(args, name, None)
+            default_value = {
+                'decoder_head': 'simple',
+                'use_boundary_refine': False,
+                'boundary_loss_weight': 0.0,
+                'boundary_alpha': 0.1,
+            }[name]
+            if current_value == default_value:
+                setattr(args, name, getattr(checkpoint_args, name))
+
 
 def main(args):
     device = torch.device(args.device)
@@ -139,9 +154,10 @@ def main(args):
     test_sampler = torch.utils.data.SequentialSampler(dataset_test)
     data_loader_test = torch.utils.data.DataLoader(dataset_test, batch_size=1,
                                                    sampler=test_sampler, num_workers=args.workers)
-    print(args.model)
-    single_model = segmentation.__dict__[args.model](pretrained='',args=args)
     checkpoint = torch.load(args.resume, map_location='cpu')
+    sync_decoder_args_from_checkpoint(args, checkpoint.get('args'))
+    print(args.model)
+    single_model = segmentation.__dict__[args.model](pretrained='', args=args)
     single_model.load_state_dict(checkpoint['model'])
     model = single_model.to(device)
 

@@ -38,13 +38,41 @@ def get_transform(args):
     return T.Compose(transforms)
 
 
-def criterion(input_tensor, target):
+def build_boundary_target(target):
+    target = target.float().unsqueeze(1)
+    dilated = nn.functional.max_pool2d(target, kernel_size=3, stride=1, padding=1)
+    eroded = 1.0 - nn.functional.max_pool2d(1.0 - target, kernel_size=3, stride=1, padding=1)
+    return (dilated - eroded).clamp_(0.0, 1.0)
+
+
+def criterion(input_tensor, target, boundary_logits=None, boundary_loss_weight=0.0):
     weight = input_tensor.new_tensor([0.9, 1.1])
-    return nn.functional.cross_entropy(input_tensor, target, weight=weight)
+    seg_loss = nn.functional.cross_entropy(input_tensor, target, weight=weight)
+    loss_dict = {
+        'loss': seg_loss.detach().item(),
+        'seg_loss': seg_loss.detach().item(),
+    }
+
+    if boundary_logits is None or boundary_loss_weight <= 0.0:
+        return seg_loss, loss_dict
+
+    if boundary_logits.shape[-2:] != target.shape[-2:]:
+        boundary_logits = nn.functional.interpolate(
+            boundary_logits,
+            size=target.shape[-2:],
+            mode='bilinear',
+            align_corners=True,
+        )
+    boundary_target = build_boundary_target(target)
+    boundary_loss = nn.functional.binary_cross_entropy_with_logits(boundary_logits, boundary_target)
+    total_loss = seg_loss + boundary_loss_weight * boundary_loss
+    loss_dict['boundary_loss'] = boundary_loss.detach().item()
+    loss_dict['loss'] = total_loss.detach().item()
+    return total_loss, loss_dict
 
 
 def train_one_epoch(model, criterion_fn, optimizer, data_loader, lr_scheduler, epoch, print_freq,
-                    iterations, bert_model):
+                    iterations, bert_model, args):
     model.train()
     metric_logger = utils.MetricLogger(delimiter='  ')
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value}'))
@@ -68,7 +96,14 @@ def train_one_epoch(model, criterion_fn, optimizer, data_loader, lr_scheduler, e
         else:
             output = model(image, sentences, l_mask=attentions)
 
-        loss = criterion_fn(output, target)
+        classifier = model.module.classifier if hasattr(model, 'module') else model.classifier
+        boundary_logits = getattr(classifier, 'last_boundary_logits', None)
+        loss, loss_dict = criterion_fn(
+            output,
+            target,
+            boundary_logits=boundary_logits,
+            boundary_loss_weight=args.boundary_loss_weight,
+        )
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -76,7 +111,10 @@ def train_one_epoch(model, criterion_fn, optimizer, data_loader, lr_scheduler, e
 
         torch.cuda.synchronize()
         iterations += 1
-        metric_logger.update(loss=loss.item(), lr=optimizer.param_groups[0]['lr'])
+        metric_logger.update(loss=loss_dict['loss'], seg_loss=loss_dict['seg_loss'],
+                             lr=optimizer.param_groups[0]['lr'])
+        if 'boundary_loss' in loss_dict:
+            metric_logger.update(boundary_loss=loss_dict['boundary_loss'])
 
         del image, target, sentences, attentions, loss, output, data
         if bert_model is not None:
@@ -100,6 +138,22 @@ def build_checkpoint(args, epoch, single_model, optimizer, lr_scheduler, single_
     if single_bert_model is not None:
         checkpoint['bert_model'] = single_bert_model.state_dict()
     return checkpoint
+
+
+def sync_decoder_args_from_checkpoint(args, checkpoint_args):
+    if checkpoint_args is None:
+        return
+    for name in ['decoder_head', 'use_boundary_refine', 'boundary_loss_weight', 'boundary_alpha']:
+        if hasattr(checkpoint_args, name):
+            current_value = getattr(args, name, None)
+            default_value = {
+                'decoder_head': 'simple',
+                'use_boundary_refine': False,
+                'boundary_loss_weight': 0.0,
+                'boundary_alpha': 0.1,
+            }[name]
+            if current_value == default_value:
+                setattr(args, name, getattr(checkpoint_args, name))
 
 
 def main(args):
@@ -132,6 +186,11 @@ def main(args):
             drop_last=True,
         )
 
+    resume_checkpoint = None
+    if args.resume:
+        resume_checkpoint = torch.load(args.resume, map_location='cpu')
+        sync_decoder_args_from_checkpoint(args, resume_checkpoint.get('args'))
+
     print(args.model)
     model = segmentation.__dict__[args.model](pretrained=args.pretrained_swin_weights, args=args)
     if args.distributed:
@@ -162,11 +221,10 @@ def main(args):
         bert_model = None
         single_bert_model = None
 
-    if args.resume:
-        checkpoint = torch.load(args.resume, map_location='cpu')
-        single_model.load_state_dict(checkpoint['model'])
+    if resume_checkpoint is not None:
+        single_model.load_state_dict(resume_checkpoint['model'])
         if args.model != 'lavt_one':
-            single_bert_model.load_state_dict(checkpoint['bert_model'])
+            single_bert_model.load_state_dict(resume_checkpoint['bert_model'])
 
     backbone_no_decay = []
     backbone_decay = []
@@ -211,10 +269,10 @@ def main(args):
     start_time = time.time()
     iterations = 0
 
-    if args.resume:
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-        resume_epoch = checkpoint['epoch']
+    if resume_checkpoint is not None:
+        optimizer.load_state_dict(resume_checkpoint['optimizer'])
+        lr_scheduler.load_state_dict(resume_checkpoint['lr_scheduler'])
+        resume_epoch = resume_checkpoint['epoch']
     else:
         resume_epoch = -1
 
@@ -234,6 +292,7 @@ def main(args):
             args.print_freq,
             iterations,
             bert_model,
+            args,
         )
         last_checkpoint = build_checkpoint(
             args,
