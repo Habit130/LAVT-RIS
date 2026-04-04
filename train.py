@@ -177,6 +177,12 @@ def train_one_epoch(model, criterion_fn, optimizer, data_loader, lr_scheduler, e
 
 def main(args):
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
+    if device.type == 'cuda':
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+        if args.disable_cudnn:
+            torch.backends.cudnn.enabled = False
+
     dataset, _ = get_dataset("train", get_transform(args=args), args=args)
     dataset_val, _ = get_dataset("val", get_transform(args=args), args=args)
 
