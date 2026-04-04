@@ -71,7 +71,7 @@ class PlantSegDataset(data.Dataset):
 
         image = Image.open(image_path).convert('RGB')
         mask = Image.open(mask_path).convert('L')
-        target = mask.point(lambda pixel: 255 if pixel > 0 else 0, mode='L')
+        target = mask.point(lambda pixel: 1 if pixel > 0 else 0, mode='L')
 
         if self.image_transforms is not None:
             image, target = self.image_transforms(image, target)

@@ -1,4 +1,3 @@
-import numpy as np
 import torch
 
 
@@ -19,16 +18,18 @@ def _to_confusion_matrix(prediction, target, num_classes=2):
 
 class BinarySegmentationMeter(object):
     def __init__(self):
-        self.confusion = np.zeros((2, 2), dtype=np.int64)
+        self.confusion = torch.zeros((2, 2), dtype=torch.int64)
 
     def update_from_logits(self, logits, target):
         prediction = logits.argmax(1)
         confusion = _to_confusion_matrix(prediction.detach().cpu(), target.detach().cpu(), num_classes=2)
-        self.confusion += confusion.numpy()
+        self.confusion += confusion
 
     def compute(self):
-        tn, fp = self.confusion[0, 0], self.confusion[0, 1]
-        fn, tp = self.confusion[1, 0], self.confusion[1, 1]
+        tn = int(self.confusion[0, 0].item())
+        fp = int(self.confusion[0, 1].item())
+        fn = int(self.confusion[1, 0].item())
+        tp = int(self.confusion[1, 1].item())
 
         fg_iou = _safe_divide(tp, tp + fp + fn)
         dice = _safe_divide(2 * tp, 2 * tp + fp + fn)
