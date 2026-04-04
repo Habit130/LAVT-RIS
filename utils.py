@@ -203,18 +203,24 @@ def save_on_master(*args, **kwargs):
 
 
 def init_distributed_mode(args):
+    args.distributed = False
+
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         rank = int(os.environ["RANK"])
         world_size = int(os.environ['WORLD_SIZE'])
         print(f"RANK and WORLD_SIZE in environment: {rank}/{world_size}")
+        args.distributed = True
     else:
         rank = -1
         world_size = -1
+        print('Not using distributed mode')
 
-    torch.cuda.set_device(args.local_rank)
-    torch.distributed.init_process_group(backend='nccl', init_method='env://', world_size=world_size, rank=rank)
-    torch.distributed.barrier()
-    setup_for_distributed(is_main_process())
+    if args.distributed:
+        torch.cuda.set_device(args.local_rank)
+        torch.distributed.init_process_group(backend='nccl', init_method='env://',
+                                             world_size=world_size, rank=rank)
+        torch.distributed.barrier()
+        setup_for_distributed(is_main_process())
 
     if args.output_dir:
         mkdir(args.output_dir)

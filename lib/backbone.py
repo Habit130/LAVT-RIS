@@ -1,3 +1,5 @@
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -5,7 +7,6 @@ import torch.utils.checkpoint as checkpoint
 import numpy as np
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from .mmcv_custom import load_checkpoint
-from mmseg.utils import get_root_logger
 
 
 class Mlp(nn.Module):
@@ -452,7 +453,7 @@ class MultiModalSwinTransformer(nn.Module):
 
         if isinstance(pretrained, str):
             self.apply(_init_weights)
-            logger = get_root_logger()
+            logger = logging.getLogger(__name__)
             load_checkpoint(self, pretrained, strict=('upernet' in pretrained), logger=logger)
         elif pretrained is None:
             self.apply(_init_weights)

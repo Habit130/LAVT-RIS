@@ -8,15 +8,16 @@ def get_parser():
     parser.add_argument('-b', '--batch-size', default=8, type=int)
     parser.add_argument('--bert_tokenizer', default='bert-base-uncased', help='BERT tokenizer')
     parser.add_argument('--ck_bert', default='bert-base-uncased', help='pre-trained BERT weights')
-    parser.add_argument('--dataset', default='refcoco', help='refcoco, refcoco+, or refcocog')
+    parser.add_argument('--dataset', default='refcoco', help='refcoco, refcoco+, refcocog, or plantseg')
     parser.add_argument('--ddp_trained_weights', action='store_true',
                         help='Only needs specified when testing,'
                              'whether the weights to be loaded are from a DDP-trained model')
-    parser.add_argument('--device', default='cuda:0', help='device')  # only used when testing on a single machine
+    parser.add_argument('--device', default='cuda:0',
+                        help='device for testing or single-GPU training')
     parser.add_argument('--epochs', default=40, type=int, metavar='N', help='number of total epochs to run')
     parser.add_argument('--fusion_drop', default=0.0, type=float, help='dropout rate for PWAMs')
     parser.add_argument('--img_size', default=480, type=int, help='input image size')
-    parser.add_argument("--local_rank", type=int, help='local rank for DistributedDataParallel')
+    parser.add_argument("--local_rank", default=-1, type=int, help='local rank for DistributedDataParallel')
     parser.add_argument('--lr', default=0.00005, type=float, help='the initial learning rate')
     parser.add_argument('--mha', default='', help='If specified, should be in the format of a-b-c-d, e.g., 4-4-4-4,'
                                                   'where a, b, c, and d refer to the numbers of heads in stage-1,'
@@ -26,8 +27,12 @@ def get_parser():
     parser.add_argument('--output-dir', default='./checkpoints/', help='path where to save checkpoint weights')
     parser.add_argument('--pin_mem', action='store_true',
                         help='If true, pin memory when using the data loader.')
+    parser.add_argument('--plantseg_root', default='../plantseg',
+                        help='plantseg dataset root directory')
+    parser.add_argument('--plantseg_caption_index', default=3, type=int,
+                        help='0-based caption index used for plantseg samples')
     parser.add_argument('--pretrained_swin_weights', default='',
-                        help='path to pre-trained Swin backbone weights')
+                        help='local path or HTTPS URL to pre-trained Swin backbone weights')
     parser.add_argument('--print-freq', default=10, type=int, help='print frequency')
     parser.add_argument('--refer_data_root', default='./refer/data/', help='REFER dataset root directory')
     parser.add_argument('--resume', default='', help='resume from checkpoint')

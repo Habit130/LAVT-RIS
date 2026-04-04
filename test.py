@@ -1,46 +1,71 @@
-import datetime
-import os
-import time
-
 import torch
 import torch.utils.data
-from torch import nn
 
 from bert.modeling_bert import BertModel
-import torchvision
 
 from lib import segmentation
+import metrics
 import transforms as T
 import utils
-
 import numpy as np
-from PIL import Image
-import torch.nn.functional as F
 
 
 def get_dataset(image_set, transform, args):
-    from data.dataset_refer_bert import ReferDataset
-    ds = ReferDataset(args,
-                      split=image_set,
-                      image_transforms=transform,
-                      target_transforms=None,
-                      eval_mode=True
-                      )
+    if args.dataset == 'plantseg':
+        from data.dataset_plantseg import PlantSegDataset
+        ds = PlantSegDataset(args,
+                             split=image_set,
+                             image_transforms=transform,
+                             target_transforms=None,
+                             eval_mode=True)
+    else:
+        from data.dataset_refer_bert import ReferDataset
+        ds = ReferDataset(args,
+                          split=image_set,
+                          image_transforms=transform,
+                          target_transforms=None,
+                          eval_mode=True)
     num_classes = 2
     return ds, num_classes
 
 
-def evaluate(model, data_loader, bert_model, device):
+def forward_model(model, bert_model, image, sentences, attentions):
+    if bert_model is not None:
+        last_hidden_states = bert_model(sentences, attention_mask=attentions)[0]
+        embedding = last_hidden_states.permute(0, 2, 1)
+        return model(image, embedding, l_mask=attentions.unsqueeze(-1))
+    return model(image, sentences, l_mask=attentions)
+
+
+def evaluate(model, data_loader, bert_model, device, args):
     model.eval()
     metric_logger = utils.MetricLogger(delimiter="  ")
 
-    # evaluation variables
+    header = 'Test:'
+
+    if args.dataset == 'plantseg':
+        meter = metrics.BinarySegmentationMeter()
+        with torch.no_grad():
+            for data in metric_logger.log_every(data_loader, 100, header):
+                image, target, sentences, attentions = data
+                image = image.to(device)
+                target = target.to(device)
+                sentences = sentences.to(device).squeeze(1)
+                attentions = attentions.to(device).squeeze(1)
+
+                for j in range(sentences.size(-1)):
+                    output = forward_model(model, bert_model, image, sentences[:, :, j], attentions[:, :, j])
+                    meter.update_from_logits(output, target)
+
+        print('Final results:')
+        print(metrics.format_binary_metrics(meter.compute()))
+        return
+
     cum_I, cum_U = 0, 0
     eval_seg_iou_list = [.5, .6, .7, .8, .9]
     seg_correct = np.zeros(len(eval_seg_iou_list), dtype=np.int32)
     seg_total = 0
     mean_IoU = []
-    header = 'Test:'
 
     with torch.no_grad():
         for data in metric_logger.log_every(data_loader, 100, header):
@@ -51,13 +76,7 @@ def evaluate(model, data_loader, bert_model, device):
             attentions = attentions.squeeze(1)
             target = target.cpu().data.numpy()
             for j in range(sentences.size(-1)):
-                if bert_model is not None:
-                    last_hidden_states = bert_model(sentences[:, :, j], attention_mask=attentions[:, :, j])[0]
-                    embedding = last_hidden_states.permute(0, 2, 1)
-                    output = model(image, embedding, l_mask=attentions[:, :, j].unsqueeze(-1))
-                else:
-                    output = model(image, sentences[:, :, j], l_mask=attentions[:, :, j])
-
+                output = forward_model(model, bert_model, image, sentences[:, :, j], attentions[:, :, j])
                 output = output.cpu()
                 output_mask = output.argmax(1).data.numpy()
                 I, U = computeIoU(output_mask, target)
@@ -74,18 +93,17 @@ def evaluate(model, data_loader, bert_model, device):
                 seg_total += 1
 
             del image, target, sentences, attentions, output, output_mask
-            if bert_model is not None:
-                del last_hidden_states, embedding
 
     mean_IoU = np.array(mean_IoU)
     mIoU = np.mean(mean_IoU)
+    overall_iou = float(cum_I * 100. / cum_U) if cum_U != 0 else 0.0
     print('Final results:')
     print('Mean IoU is %.2f\n' % (mIoU*100.))
     results_str = ''
     for n_eval_iou in range(len(eval_seg_iou_list)):
         results_str += '    precision@%s = %.2f\n' % \
                        (str(eval_seg_iou_list[n_eval_iou]), seg_correct[n_eval_iou] * 100. / seg_total)
-    results_str += '    overall IoU = %.2f\n' % (cum_I * 100. / cum_U)
+    results_str += '    overall IoU = %.2f\n' % overall_iou
     print(results_str)
 
 
@@ -106,7 +124,7 @@ def computeIoU(pred_seg, gd_seg):
 
 
 def main(args):
-    device = torch.device(args.device)
+    device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     dataset_test, _ = get_dataset(args.split, get_transform(args=args), args)
     test_sampler = torch.utils.data.SequentialSampler(dataset_test)
     data_loader_test = torch.utils.data.DataLoader(dataset_test, batch_size=1,
@@ -128,7 +146,7 @@ def main(args):
     else:
         bert_model = None
 
-    evaluate(model, data_loader_test, bert_model, device=device)
+    evaluate(model, data_loader_test, bert_model, device=device, args=args)
 
 
 if __name__ == "__main__":

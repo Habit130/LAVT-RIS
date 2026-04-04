@@ -1,0 +1,29 @@
+name: lavt-plantseg
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pytorch=2.1.*
+  - torchvision=0.16.*
+  - pytorch-cuda=11.8
+  - numpy=1.26.*
+  - pillow
+  - scipy
+  - scikit-image
+  - matplotlib
+  - cython
+  - pip
+  - pip:
+      - timm>=0.9,<1.0
+      - requests
+      - filelock
+      - tqdm
+      - ftfy
+      - regex
+      - pycocotools>=2.0.7
+      - opencv-python-headless>=4.8
+      - tokenizers>=0.13,<0.20
+      - h5py
+
