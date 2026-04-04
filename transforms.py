@@ -1,4 +1,3 @@
-import numpy as np
 from PIL import Image
 import random
 
@@ -91,9 +90,26 @@ class CenterCrop(object):
 
 
 class ToTensor(object):
+    @staticmethod
+    def _pil_image_to_tensor(image):
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+        channels = len(image.getbands())
+        tensor = torch.ByteTensor(torch.ByteStorage.from_buffer(image.tobytes()))
+        tensor = tensor.view(image.size[1], image.size[0], channels)
+        tensor = tensor.permute(2, 0, 1).contiguous()
+        return tensor.float().div(255.0)
+
+    @staticmethod
+    def _pil_mask_to_tensor(mask):
+        mask = mask.convert("L")
+        tensor = torch.ByteTensor(torch.ByteStorage.from_buffer(mask.tobytes()))
+        tensor = tensor.view(mask.size[1], mask.size[0]).contiguous()
+        return tensor.to(dtype=torch.int64)
+
     def __call__(self, image, target):
-        image = F.to_tensor(image)
-        target = torch.as_tensor(np.asarray(target).copy(), dtype=torch.int64)
+        image = self._pil_image_to_tensor(image)
+        target = self._pil_mask_to_tensor(target)
         return image, target
 
 

@@ -1,7 +1,6 @@
 import json
 from pathlib import Path
 
-import numpy as np
 import torch
 import torch.utils.data as data
 from PIL import Image
@@ -71,9 +70,8 @@ class PlantSegDataset(data.Dataset):
         mask_path = self.root / sample['mask']
 
         image = Image.open(image_path).convert('RGB')
-        mask = Image.open(mask_path)
-        mask_array = (np.array(mask) > 0).astype(np.uint8)
-        target = Image.fromarray(mask_array, mode='P')
+        mask = Image.open(mask_path).convert('L')
+        target = mask.point(lambda pixel: 255 if pixel > 0 else 0, mode='L')
 
         if self.image_transforms is not None:
             image, target = self.image_transforms(image, target)
@@ -86,4 +84,3 @@ class PlantSegDataset(data.Dataset):
             attention_mask = attention_mask.unsqueeze(-1)
 
         return image, target, sentence, attention_mask
-
