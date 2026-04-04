@@ -105,7 +105,7 @@ class ToTensor(object):
         mask = mask.convert("L")
         tensor = torch.ByteTensor(torch.ByteStorage.from_buffer(mask.tobytes()))
         tensor = tensor.view(mask.size[1], mask.size[0]).contiguous()
-        return tensor.to(dtype=torch.int64)
+        return tensor.gt(0).to(dtype=torch.int64)
 
     def __call__(self, image, target):
         image = self._pil_image_to_tensor(image)
