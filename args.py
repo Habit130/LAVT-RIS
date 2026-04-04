@@ -34,8 +34,6 @@ def get_parser():
     parser.add_argument('--pretrained_swin_weights', default='',
                         help='local path or HTTPS URL to pre-trained Swin backbone weights')
     parser.add_argument('--print-freq', default=10, type=int, help='print frequency')
-    parser.add_argument('--disable-cudnn', action='store_true',
-                        help='disable cuDNN to work around backward kernel instability on some servers')
     parser.add_argument('--refer_data_root', default='./refer/data/', help='REFER dataset root directory')
     parser.add_argument('--resume', default='', help='resume from checkpoint')
     parser.add_argument('--split', default='test', help='only used when testing')
