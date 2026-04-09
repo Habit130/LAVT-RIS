@@ -82,5 +82,6 @@ class PlantSegDataset(data.Dataset):
         if self.eval_mode:
             sentence = sentence.unsqueeze(-1)
             attention_mask = attention_mask.unsqueeze(-1)
+            return image, target, sentence, attention_mask, sample['mask']
 
         return image, target, sentence, attention_mask

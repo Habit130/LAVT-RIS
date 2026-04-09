@@ -1,5 +1,8 @@
+from pathlib import Path
+
 import torch
 import torch.utils.data
+from PIL import Image
 
 from bert.modeling_bert import BertModel
 
@@ -45,9 +48,10 @@ def evaluate(model, data_loader, bert_model, device, args):
 
     if args.dataset == 'plantseg':
         meter = metrics.BinarySegmentationMeter()
+        save_root = Path(args.save_mask_dir).expanduser().resolve() if args.save_mask_dir else None
         with torch.no_grad():
             for data in metric_logger.log_every(data_loader, 100, header):
-                image, target, sentences, attentions = data
+                image, target, sentences, attentions, mask_paths = data
                 image = image.to(device)
                 target = target.to(device)
                 sentences = sentences.to(device).squeeze(1)
@@ -56,6 +60,8 @@ def evaluate(model, data_loader, bert_model, device, args):
                 for j in range(sentences.size(-1)):
                     output = forward_model(model, bert_model, image, sentences[:, :, j], attentions[:, :, j])
                     meter.update_from_logits(output, target)
+                    if save_root is not None:
+                        save_prediction_mask(output, mask_paths[0], args, save_root)
 
         print('Final results:')
         print(metrics.format_binary_metrics(meter.compute()))
@@ -121,6 +127,28 @@ def computeIoU(pred_seg, gd_seg):
     U = np.sum(np.logical_or(pred_seg, gd_seg))
 
     return I, U
+
+
+def _prediction_tensor_to_bytes(prediction):
+    prediction = prediction.detach().cpu().to(torch.uint8).mul(255).contiguous().view(-1)
+    return bytes(prediction.tolist())
+
+
+def save_prediction_mask(logits, mask_relative_path, args, save_root):
+    prediction = logits.argmax(1)[0]
+    flat_bytes = _prediction_tensor_to_bytes(prediction)
+    mask_image = Image.frombytes('L', (prediction.shape[1], prediction.shape[0]), flat_bytes)
+
+    reference_mask_path = Path(args.plantseg_root).expanduser().resolve() / mask_relative_path
+    with Image.open(reference_mask_path) as reference_mask:
+        if mask_image.size != reference_mask.size:
+            mask_image = mask_image.resize(reference_mask.size, resample=Image.NEAREST)
+        if reference_mask.mode != mask_image.mode:
+            mask_image = mask_image.convert(reference_mask.mode)
+
+    output_path = save_root / mask_relative_path
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    mask_image.save(output_path)
 
 
 def main(args):
