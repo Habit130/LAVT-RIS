@@ -72,23 +72,54 @@ def forward_model(model, bert_model, image, sentences, attentions, return_aux=Fa
     return model(image, sentences, l_mask=attentions, return_aux=return_aux)
 
 
-def compute_hsb_loss(aux_dict, target):
+def unpack_training_batch(data, dataset_name):
+    if dataset_name == 'plantseg' and len(data) == 6:
+        image, target, sentences, attentions, false_healthy_mask, has_false_healthy = data
+        return image, target, sentences, attentions, false_healthy_mask, has_false_healthy
+    image, target, sentences, attentions = data
+    return image, target, sentences, attentions, None, None
+
+
+def compute_hsb_loss(aux_dict, target, false_healthy_mask=None, has_false_healthy=None, lambda_fh=1.0):
     if not aux_dict:
-        return torch.zeros((), device=target.device, dtype=torch.float32)
+        zero = torch.zeros((), device=target.device, dtype=torch.float32)
+        return zero, zero, zero
 
     hsb_loss = torch.zeros((), device=target.device, dtype=torch.float32)
+    hsb_disease_loss = torch.zeros((), device=target.device, dtype=torch.float32)
+    hsb_false_healthy_loss = torch.zeros((), device=target.device, dtype=torch.float32)
     target = target.float().unsqueeze(1)
+    if false_healthy_mask is not None:
+        false_healthy_mask = false_healthy_mask.float().unsqueeze(1)
+    if has_false_healthy is not None:
+        sample_valid = has_false_healthy.float().view(-1, 1, 1, 1)
+    else:
+        sample_valid = None
+
     for stage_name in ('hsb_stage3', 'hsb_stage4'):
         if stage_name not in aux_dict:
             continue
         m_h = aux_dict[stage_name]
-        gt_i = F.interpolate(target, size=m_h.shape[-2:], mode='nearest')
-        positive_mask = (gt_i > 0.5).float()
+        disease_i = F.interpolate(target, size=m_h.shape[-2:], mode='nearest')
+        disease_pos = (disease_i > 0.5).float()
         target_zero = torch.zeros_like(m_h)
-        per_pixel = F.binary_cross_entropy(m_h, target_zero, reduction='none')
-        hsb_loss = hsb_loss + (per_pixel * positive_mask).sum() / (positive_mask.sum() + 1e-6)
+        per_pixel_disease = F.binary_cross_entropy(m_h, target_zero, reduction='none')
+        loss_disease_i = (per_pixel_disease * disease_pos).sum() / (disease_pos.sum() + 1e-6)
 
-    return hsb_loss
+        loss_false_i = torch.zeros((), device=target.device, dtype=torch.float32)
+        if false_healthy_mask is not None and sample_valid is not None:
+            false_healthy_i = F.interpolate(false_healthy_mask, size=m_h.shape[-2:], mode='nearest')
+            false_pos = (false_healthy_i > 0.5).float()
+            target_one = torch.ones_like(m_h)
+            per_pixel_false = F.binary_cross_entropy(m_h, target_one, reduction='none')
+            valid_false_pos = false_pos * sample_valid
+            loss_false_i = (per_pixel_false * valid_false_pos).sum() / (valid_false_pos.sum() + 1e-6)
+
+        hsb_disease_loss = hsb_disease_loss + loss_disease_i
+        hsb_false_healthy_loss = hsb_false_healthy_loss + loss_false_i
+        hsb_loss = hsb_loss + loss_disease_i + lambda_fh * loss_false_i
+
+    return hsb_loss, hsb_disease_loss, hsb_false_healthy_loss
 
 
 def evaluate(model, data_loader, bert_model, device, args):
@@ -100,7 +131,7 @@ def evaluate(model, data_loader, bert_model, device, args):
         meter = metrics.BinarySegmentationMeter()
         with torch.no_grad():
             for data in metric_logger.log_every(data_loader, 100, header):
-                image, target, sentences, attentions = data
+                image, target, sentences, attentions, _, _ = unpack_training_batch(data, args.dataset)
                 image = image.to(device, non_blocking=device.type == 'cuda')
                 target = target.to(device, non_blocking=device.type == 'cuda')
                 sentences = sentences.to(device, non_blocking=device.type == 'cuda').squeeze(1)
@@ -168,21 +199,34 @@ def train_one_epoch(model, criterion_fn, optimizer, data_loader, lr_scheduler, e
     header = 'Epoch: [{}]'.format(epoch)
 
     for data in metric_logger.log_every(data_loader, print_freq, header):
-        image, target, sentences, attentions = data
+        image, target, sentences, attentions, false_healthy_mask, has_false_healthy = \
+            unpack_training_batch(data, args.dataset)
         image = image.to(device, non_blocking=device.type == 'cuda')
         target = target.to(device, non_blocking=device.type == 'cuda')
         sentences = sentences.to(device, non_blocking=device.type == 'cuda').squeeze(1)
         attentions = attentions.to(device, non_blocking=device.type == 'cuda').squeeze(1)
+        if false_healthy_mask is not None:
+            false_healthy_mask = false_healthy_mask.to(device, non_blocking=device.type == 'cuda')
+        if has_false_healthy is not None:
+            has_false_healthy = has_false_healthy.to(device, non_blocking=device.type == 'cuda')
 
         if args.use_hsb:
             output, aux_dict = forward_model(model, bert_model, image, sentences, attentions, return_aux=True)
             seg_loss = criterion_fn(output, target)
-            hsb_loss = compute_hsb_loss(aux_dict, target)
-            loss = seg_loss + args.lambda_hsb * hsb_loss
+            hsb_loss, hsb_disease_loss, hsb_false_healthy_loss = compute_hsb_loss(
+                aux_dict,
+                target,
+                false_healthy_mask=false_healthy_mask,
+                has_false_healthy=has_false_healthy,
+                lambda_fh=getattr(args, 'lambda_fh', 1.0)
+            )
+            loss = seg_loss + getattr(args, 'lambda_hsb', 0.1) * hsb_loss
         else:
             output = forward_model(model, bert_model, image, sentences, attentions)
             seg_loss = criterion_fn(output, target)
             hsb_loss = None
+            hsb_disease_loss = None
+            hsb_false_healthy_loss = None
             loss = seg_loss
 
         optimizer.zero_grad()
@@ -198,13 +242,19 @@ def train_one_epoch(model, criterion_fn, optimizer, data_loader, lr_scheduler, e
             metric_logger.update(loss=loss.item(),
                                  seg_loss=seg_loss.item(),
                                  hsb_loss=hsb_loss.item(),
+                                 hsb_disease_loss=hsb_disease_loss.item(),
+                                 hsb_false_healthy_loss=hsb_false_healthy_loss.item(),
                                  lr=optimizer.param_groups[0]["lr"])
         else:
             metric_logger.update(loss=loss.item(), lr=optimizer.param_groups[0]["lr"])
 
         del image, target, sentences, attentions, loss, seg_loss, output, data
+        if false_healthy_mask is not None:
+            del false_healthy_mask
+        if has_false_healthy is not None:
+            del has_false_healthy
         if args.use_hsb:
-            del aux_dict, hsb_loss
+            del aux_dict, hsb_loss, hsb_disease_loss, hsb_false_healthy_loss
         gc.collect()
         if device.type == 'cuda':
             torch.cuda.empty_cache()

@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 import torch.utils.data as data
 from PIL import Image
 
@@ -9,6 +10,12 @@ from bert.tokenization_bert import BertTokenizer
 
 
 class PlantSegDataset(data.Dataset):
+    @staticmethod
+    def _pil_mask_to_float_tensor(mask):
+        mask = mask.convert('L')
+        tensor = torch.frombuffer(mask.tobytes(), dtype=torch.uint8)
+        tensor = tensor.view(mask.size[1], mask.size[0]).clone().contiguous()
+        return tensor.gt(0).to(dtype=torch.float32)
 
     def __init__(self,
                  args,
@@ -64,6 +71,21 @@ class PlantSegDataset(data.Dataset):
     def __len__(self):
         return len(self.samples)
 
+    def _load_false_healthy_mask(self, sample, target):
+        false_healthy_path = sample.get('false_healthy_ann')
+        has_false_healthy = torch.tensor(bool(false_healthy_path), dtype=torch.bool)
+        if not torch.is_tensor(target):
+            return target, has_false_healthy
+
+        if not false_healthy_path:
+            return torch.zeros_like(target, dtype=torch.float32), has_false_healthy
+
+        false_healthy = Image.open(self.root / false_healthy_path).convert('L')
+        false_healthy = false_healthy.point(lambda pixel: 1 if pixel > 0 else 0, mode='L')
+        false_healthy = self._pil_mask_to_float_tensor(false_healthy).unsqueeze(0).unsqueeze(0)
+        false_healthy = F.interpolate(false_healthy, size=target.shape[-2:], mode='nearest')
+        return false_healthy.squeeze(0).squeeze(0), has_false_healthy
+
     def __getitem__(self, index):
         sample = self.samples[index]
         image_path = self.root / sample['image']
@@ -84,4 +106,5 @@ class PlantSegDataset(data.Dataset):
             attention_mask = attention_mask.unsqueeze(-1)
             return image, target, sentence, attention_mask, sample['mask']
 
-        return image, target, sentence, attention_mask
+        false_healthy_mask, has_false_healthy = self._load_false_healthy_mask(sample, target)
+        return image, target, sentence, attention_mask, false_healthy_mask, has_false_healthy

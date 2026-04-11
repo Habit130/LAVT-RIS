@@ -34,6 +34,8 @@ def get_parser():
                         help='1-based stage ids where HSB is enabled')
     parser.add_argument('--lambda_hsb', default=0.1, type=float,
                         help='loss weight for the healthy suppression branch')
+    parser.add_argument('--lambda_fh', default=1.0, type=float,
+                        help='loss weight for false-healthy supervision inside the HSB loss')
     parser.add_argument('--pin_mem', action='store_true',
                         help='If true, pin memory when using the data loader.')
     parser.add_argument('--plantseg_root', default='../plantseg',
