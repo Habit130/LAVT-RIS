@@ -8,6 +8,7 @@ from functools import reduce
 import numpy as np
 import torch
 import torch.utils.data
+import torch.nn.functional as F
 from torch import nn
 
 from bert.modeling_bert import BertModel
@@ -62,13 +63,32 @@ def criterion(input_tensor, target):
     return nn.functional.cross_entropy(input_tensor, target, weight=weight)
 
 
-def forward_model(model, bert_model, image, sentences, attentions):
+def forward_model(model, bert_model, image, sentences, attentions, return_aux=False):
     if bert_model is not None:
         last_hidden_states = bert_model(sentences, attention_mask=attentions)[0]
         embedding = last_hidden_states.permute(0, 2, 1)
-        output = model(image, embedding, l_mask=attentions.unsqueeze(dim=-1))
+        output = model(image, embedding, l_mask=attentions.unsqueeze(dim=-1), return_aux=return_aux)
         return output
-    return model(image, sentences, l_mask=attentions)
+    return model(image, sentences, l_mask=attentions, return_aux=return_aux)
+
+
+def compute_hsb_loss(aux_dict, target):
+    if not aux_dict:
+        return torch.zeros((), device=target.device, dtype=torch.float32)
+
+    hsb_loss = torch.zeros((), device=target.device, dtype=torch.float32)
+    target = target.float().unsqueeze(1)
+    for stage_name in ('hsb_stage3', 'hsb_stage4'):
+        if stage_name not in aux_dict:
+            continue
+        m_h = aux_dict[stage_name]
+        gt_i = F.interpolate(target, size=m_h.shape[-2:], mode='nearest')
+        positive_mask = (gt_i > 0.5).float()
+        target_zero = torch.zeros_like(m_h)
+        per_pixel = F.binary_cross_entropy(m_h, target_zero, reduction='none')
+        hsb_loss = hsb_loss + (per_pixel * positive_mask).sum() / (positive_mask.sum() + 1e-6)
+
+    return hsb_loss
 
 
 def evaluate(model, data_loader, bert_model, device, args):
@@ -138,7 +158,7 @@ def evaluate(model, data_loader, bert_model, device, args):
 
 
 def train_one_epoch(model, criterion_fn, optimizer, data_loader, lr_scheduler, epoch, print_freq,
-                    iterations, bert_model, device):
+                    iterations, bert_model, device, args):
     model.train()
     if bert_model is not None:
         bert_model.train()
@@ -154,8 +174,16 @@ def train_one_epoch(model, criterion_fn, optimizer, data_loader, lr_scheduler, e
         sentences = sentences.to(device, non_blocking=device.type == 'cuda').squeeze(1)
         attentions = attentions.to(device, non_blocking=device.type == 'cuda').squeeze(1)
 
-        output = forward_model(model, bert_model, image, sentences, attentions)
-        loss = criterion_fn(output, target)
+        if args.use_hsb:
+            output, aux_dict = forward_model(model, bert_model, image, sentences, attentions, return_aux=True)
+            seg_loss = criterion_fn(output, target)
+            hsb_loss = compute_hsb_loss(aux_dict, target)
+            loss = seg_loss + args.lambda_hsb * hsb_loss
+        else:
+            output = forward_model(model, bert_model, image, sentences, attentions)
+            seg_loss = criterion_fn(output, target)
+            hsb_loss = None
+            loss = seg_loss
 
         optimizer.zero_grad()
         loss.backward()
@@ -166,9 +194,17 @@ def train_one_epoch(model, criterion_fn, optimizer, data_loader, lr_scheduler, e
             torch.cuda.synchronize()
 
         iterations += 1
-        metric_logger.update(loss=loss.item(), lr=optimizer.param_groups[0]["lr"])
+        if args.use_hsb:
+            metric_logger.update(loss=loss.item(),
+                                 seg_loss=seg_loss.item(),
+                                 hsb_loss=hsb_loss.item(),
+                                 lr=optimizer.param_groups[0]["lr"])
+        else:
+            metric_logger.update(loss=loss.item(), lr=optimizer.param_groups[0]["lr"])
 
-        del image, target, sentences, attentions, loss, output, data
+        del image, target, sentences, attentions, loss, seg_loss, output, data
+        if args.use_hsb:
+            del aux_dict, hsb_loss
         gc.collect()
         if device.type == 'cuda':
             torch.cuda.empty_cache()
@@ -275,7 +311,7 @@ def main(args):
             data_loader.sampler.set_epoch(epoch)
 
         train_one_epoch(model, criterion, optimizer, data_loader, lr_scheduler, epoch,
-                        args.print_freq, iterations, bert_model, device)
+                        args.print_freq, iterations, bert_model, device, args)
         validation_result = evaluate(model, data_loader_val, bert_model, device, args)
 
         if args.dataset == 'plantseg':

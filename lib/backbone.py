@@ -288,6 +288,22 @@ class PatchMerging(nn.Module):
         return x
 
 
+class HealthySuppressionBranch(nn.Module):
+    def __init__(self, in_channels_v, in_channels_f, hidden_channels=None, alpha=0.5):
+        super().__init__()
+        hidden_channels = hidden_channels or in_channels_f
+        self.alpha = alpha
+        self.conv1 = nn.Conv2d(in_channels_v + in_channels_f, hidden_channels, kernel_size=1, bias=True)
+        self.act = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(hidden_channels, 1, kernel_size=1, bias=True)
+
+    def forward(self, v, f):
+        x = torch.cat([v, f], dim=1)
+        m_h = torch.sigmoid(self.conv2(self.act(self.conv1(x))))
+        f_hat = f * (1 - self.alpha * m_h)
+        return f_hat, m_h
+
+
 class PatchEmbed(nn.Module):
     """ Image to Patch Embedding
 
@@ -353,7 +369,11 @@ class MultiModalSwinTransformer(nn.Module):
                  frozen_stages=-1,
                  use_checkpoint=False,
                  num_heads_fusion=[1, 1, 1, 1],
-                 fusion_drop=0.0
+                 fusion_drop=0.0,
+                 use_hsb=True,
+                 hsb_stages=(3, 4),
+                 hsb_alpha=0.5,
+                 hsb_hidden_ratio=0.5
                  ):
         super().__init__()
 
@@ -402,7 +422,12 @@ class MultiModalSwinTransformer(nn.Module):
                 downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
                 use_checkpoint=use_checkpoint,
                 num_heads_fusion=num_heads_fusion[i_layer],
-                fusion_drop=fusion_drop
+                fusion_drop=fusion_drop,
+                layer_index=i_layer,
+                use_hsb=use_hsb,
+                hsb_stages=hsb_stages,
+                hsb_alpha=hsb_alpha,
+                hsb_hidden_ratio=hsb_hidden_ratio
             )
             self.layers.append(layer)
 
@@ -460,7 +485,7 @@ class MultiModalSwinTransformer(nn.Module):
         else:
             raise TypeError('pretrained must be a str or None')
 
-    def forward(self, x, l, l_mask):
+    def forward(self, x, l, l_mask, return_aux=False):
         """Forward function."""
         x = self.patch_embed(x)
 
@@ -474,9 +499,11 @@ class MultiModalSwinTransformer(nn.Module):
         x = self.pos_drop(x)
 
         outs = []
+        aux_dict = {}
         for i in range(self.num_layers):
             layer = self.layers[i]
-            x_out, H, W, x, Wh, Ww = layer(x, Wh, Ww, l, l_mask)
+            x_out, H, W, x, Wh, Ww, layer_aux = layer(x, Wh, Ww, l, l_mask)
+            aux_dict.update(layer_aux)
 
             if i in self.out_indices:
                 norm_layer = getattr(self, f'norm{i}')
@@ -485,6 +512,8 @@ class MultiModalSwinTransformer(nn.Module):
                 out = x_out.view(-1, H, W, self.num_features[i]).permute(0, 3, 1, 2).contiguous()
                 outs.append(out)
 
+        if return_aux:
+            return tuple(outs), aux_dict
         return tuple(outs)
 
     def train(self, mode=True):
@@ -509,7 +538,12 @@ class MMBasicLayer(nn.Module):
                  downsample=None,
                  use_checkpoint=False,
                  num_heads_fusion=1,
-                 fusion_drop=0.0
+                 fusion_drop=0.0,
+                 layer_index=0,
+                 use_hsb=True,
+                 hsb_stages=(3, 4),
+                 hsb_alpha=0.5,
+                 hsb_hidden_ratio=0.5
                  ):
         super().__init__()
         self.window_size = window_size
@@ -517,6 +551,9 @@ class MMBasicLayer(nn.Module):
         self.depth = depth
         self.use_checkpoint = use_checkpoint
         self.dim = dim
+        self.layer_index = layer_index
+        self.stage_id = layer_index + 1
+        self.use_hsb = use_hsb and self.stage_id in set(hsb_stages)
 
         # build blocks
         self.blocks = nn.ModuleList([
@@ -549,6 +586,11 @@ class MMBasicLayer(nn.Module):
             nn.Linear(dim, dim, bias=False),
             nn.Tanh()
         )
+        if self.use_hsb:
+            hidden_channels = max(1, int(dim * hsb_hidden_ratio))
+            self.hsb = HealthySuppressionBranch(dim, dim, hidden_channels=hidden_channels, alpha=hsb_alpha)
+        else:
+            self.hsb = None
         # patch merging layer
         if downsample is not None:
             self.downsample = downsample(dim=dim, norm_layer=norm_layer)
@@ -593,15 +635,24 @@ class MMBasicLayer(nn.Module):
 
         # PWAM fusion
         x_residual = self.fusion(x, l, l_mask)
+        x_out = x_residual
+        aux_dict = {}
+        if self.hsb is not None:
+            bsz = x.shape[0]
+            v_i = x.view(bsz, H, W, self.dim).permute(0, 3, 1, 2).contiguous()
+            f_i = x_residual.view(bsz, H, W, self.dim).permute(0, 3, 1, 2).contiguous()
+            f_hat_i, m_h_i = self.hsb(v_i, f_i)
+            x_out = f_hat_i.permute(0, 2, 3, 1).reshape(bsz, H * W, self.dim)
+            aux_dict['hsb_stage{}'.format(self.stage_id)] = m_h_i
         # apply a gate on the residual
-        x = x + (self.res_gate(x_residual) * x_residual)
+        x = x + (self.res_gate(x_out) * x_out)
 
         if self.downsample is not None:
             x_down = self.downsample(x, H, W)
             Wh, Ww = (H + 1) // 2, (W + 1) // 2
-            return x_residual, H, W, x_down, Wh, Ww
+            return x_out, H, W, x_down, Wh, Ww, aux_dict
         else:
-            return x_residual, H, W, x, H, W
+            return x_out, H, W, x, H, W, aux_dict
 
 
 class PWAM(nn.Module):

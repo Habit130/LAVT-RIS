@@ -7,6 +7,16 @@ from ._utils import LAVT, LAVTOne
 __all__ = ['lavt', 'lavt_one']
 
 
+def _get_hsb_kwargs(args):
+    hsb_stages = tuple(int(stage) for stage in getattr(args, 'hsb_stages', (3, 4)))
+    return dict(
+        use_hsb=getattr(args, 'use_hsb', True),
+        hsb_stages=hsb_stages,
+        hsb_alpha=getattr(args, 'hsb_alpha', 0.5),
+        hsb_hidden_ratio=getattr(args, 'hsb_hidden_ratio', 0.5)
+    )
+
+
 # LAVT
 def _segm_lavt(pretrained, args):
     # initialize the SwinTransformer backbone with the specified version
@@ -42,12 +52,14 @@ def _segm_lavt(pretrained, args):
         mha = [1, 1, 1, 1]
 
     out_indices = (0, 1, 2, 3)
+    hsb_kwargs = _get_hsb_kwargs(args)
     backbone = MultiModalSwinTransformer(embed_dim=embed_dim, depths=depths, num_heads=num_heads,
                                          window_size=window_size,
                                          ape=False, drop_path_rate=0.3, patch_norm=True,
                                          out_indices=out_indices,
                                          use_checkpoint=False, num_heads_fusion=mha,
-                                         fusion_drop=args.fusion_drop
+                                         fusion_drop=args.fusion_drop,
+                                         **hsb_kwargs
                                          )
     if pretrained:
         print('Initializing Multi-modal Swin Transformer weights from ' + pretrained)
@@ -111,12 +123,14 @@ def _segm_lavt_one(pretrained, args):
         mha = [1, 1, 1, 1]
 
     out_indices = (0, 1, 2, 3)
+    hsb_kwargs = _get_hsb_kwargs(args)
     backbone = MultiModalSwinTransformer(embed_dim=embed_dim, depths=depths, num_heads=num_heads,
                                          window_size=window_size,
                                          ape=False, drop_path_rate=0.3, patch_norm=True,
                                          out_indices=out_indices,
                                          use_checkpoint=False, num_heads_fusion=mha,
-                                         fusion_drop=args.fusion_drop
+                                         fusion_drop=args.fusion_drop,
+                                         **hsb_kwargs
                                          )
     if pretrained:
         print('Initializing Multi-modal Swin Transformer weights from ' + pretrained)

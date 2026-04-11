@@ -3,6 +3,7 @@ import argparse
 
 def get_parser():
     parser = argparse.ArgumentParser(description='LAVT training and testing')
+    parser.set_defaults(use_hsb=True)
     parser.add_argument('--amsgrad', action='store_true',
                         help='if true, set amsgrad to True in an Adam or AdamW optimizer.')
     parser.add_argument('-b', '--batch-size', default=8, type=int)
@@ -25,6 +26,14 @@ def get_parser():
     parser.add_argument('--model', default='lavt', help='model: lavt, lavt_one')
     parser.add_argument('--model_id', default='lavt', help='name to identify the model')
     parser.add_argument('--output-dir', default='./checkpoints/', help='path where to save checkpoint weights')
+    parser.add_argument('--hsb_alpha', default=0.5, type=float,
+                        help='suppression strength alpha used by the healthy suppression branch')
+    parser.add_argument('--hsb_hidden_ratio', default=0.5, type=float,
+                        help='hidden channel ratio used by the healthy suppression branch')
+    parser.add_argument('--hsb_stages', nargs='+', default=[3, 4], type=int,
+                        help='1-based stage ids where HSB is enabled')
+    parser.add_argument('--lambda_hsb', default=0.1, type=float,
+                        help='loss weight for the healthy suppression branch')
     parser.add_argument('--pin_mem', action='store_true',
                         help='If true, pin memory when using the data loader.')
     parser.add_argument('--plantseg_root', default='../plantseg',
@@ -49,6 +58,10 @@ def get_parser():
                              'when training, window size is inferred from pre-trained weights file name'
                              '(containing \'window12\'). Initialize Swin with window size 12 instead of the default 7.')
     parser.add_argument('-j', '--workers', default=8, type=int, metavar='N', help='number of data loading workers')
+    parser.add_argument('--use_hsb', dest='use_hsb', action='store_true',
+                        help='enable the healthy suppression branch on selected stages')
+    parser.add_argument('--disable_hsb', dest='use_hsb', action='store_false',
+                        help='disable the healthy suppression branch')
 
     return parser
 
