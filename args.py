@@ -3,6 +3,7 @@ import argparse
 
 def get_parser():
     parser = argparse.ArgumentParser(description='LAVT training and testing')
+    parser.set_defaults(use_hlg=True, use_hsb=False)
     parser.add_argument('--amsgrad', action='store_true',
                         help='if true, set amsgrad to True in an Adam or AdamW optimizer.')
     parser.add_argument('-b', '--batch-size', default=8, type=int)
@@ -16,7 +17,17 @@ def get_parser():
                         help='device for testing or single-GPU training')
     parser.add_argument('--epochs', default=40, type=int, metavar='N', help='number of total epochs to run')
     parser.add_argument('--fusion_drop', default=0.0, type=float, help='dropout rate for PWAMs')
+    parser.add_argument('--disable_hlg', dest='use_hlg', action='store_false',
+                        help='disable the stage-specific healthy-suppressed language gate')
+    parser.add_argument('--hlg_hidden_channels', default=None, type=int,
+                        help='hidden channels for HLG; defaults to the stage channel dimension when omitted')
+    parser.add_argument('--hlg_stages', default=[3, 4], nargs='+', type=int,
+                        help='1-based stage ids that use HLG instead of the original gate')
     parser.add_argument('--img_size', default=480, type=int, help='input image size')
+    parser.add_argument('--lambda_fh', default=2.0, type=float,
+                        help='weight for false-healthy gate supervision inside each stage gate loss')
+    parser.add_argument('--lambda_gate', default=0.2, type=float,
+                        help='weight for the summed gate loss in the total training loss')
     parser.add_argument("--local_rank", default=-1, type=int, help='local rank for DistributedDataParallel')
     parser.add_argument('--lr', default=0.00005, type=float, help='the initial learning rate')
     parser.add_argument('--mha', default='', help='If specified, should be in the format of a-b-c-d, e.g., 4-4-4-4,'
@@ -42,6 +53,8 @@ def get_parser():
     parser.add_argument('--splitBy', default='unc', help='change to umd or google when the dataset is G-Ref (RefCOCOg)')
     parser.add_argument('--swin_type', default='base',
                         help='tiny, small, base, or large variants of the Swin Transformer')
+    parser.add_argument('--use_hsb', dest='use_hsb', action='store_true',
+                        help='reserved compatibility flag; this HLG-only experiment keeps HSB disabled by default')
     parser.add_argument('--wd', '--weight-decay', default=1e-2, type=float, metavar='W', help='weight decay',
                         dest='weight_decay')
     parser.add_argument('--window12', action='store_true',

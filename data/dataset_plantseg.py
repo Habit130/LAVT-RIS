@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 import torch.utils.data as data
 from PIL import Image
 
@@ -58,6 +59,13 @@ class PlantSegDataset(data.Dataset):
             self.input_ids.append(torch.tensor(padded_input_ids).unsqueeze(0))
             self.attention_masks.append(torch.tensor(attention_mask).unsqueeze(0))
 
+    @staticmethod
+    def _mask_to_tensor(mask):
+        mask = mask.convert('L')
+        tensor = torch.frombuffer(mask.tobytes(), dtype=torch.uint8)
+        tensor = tensor.view(mask.size[1], mask.size[0]).clone().contiguous()
+        return tensor.gt(0).to(dtype=torch.int64)
+
     def get_classes(self):
         return self.classes
 
@@ -68,13 +76,27 @@ class PlantSegDataset(data.Dataset):
         sample = self.samples[index]
         image_path = self.root / sample['image']
         mask_path = self.root / sample['mask']
+        false_healthy_rel = sample.get('false_healthy_ann')
 
         image = Image.open(image_path).convert('RGB')
         mask = Image.open(mask_path).convert('L')
         target = mask.point(lambda pixel: 1 if pixel > 0 else 0, mode='L')
+        if false_healthy_rel:
+            false_healthy_mask = Image.open(self.root / false_healthy_rel).convert('L')
+        else:
+            false_healthy_mask = Image.new('L', mask.size, 0)
 
         if self.image_transforms is not None:
             image, target = self.image_transforms(image, target)
+            if isinstance(target, torch.Tensor):
+                false_healthy_mask = self._mask_to_tensor(false_healthy_mask).unsqueeze(0).unsqueeze(0).float()
+                false_healthy_mask = F.interpolate(false_healthy_mask,
+                                                   size=target.shape[-2:],
+                                                   mode='nearest').squeeze(0).squeeze(0).to(dtype=torch.int64)
+            else:
+                false_healthy_mask = false_healthy_mask.resize((target.size[0], target.size[1]), resample=Image.NEAREST)
+        else:
+            false_healthy_mask = self._mask_to_tensor(false_healthy_mask)
 
         sentence = self.input_ids[index]
         attention_mask = self.attention_masks[index]
@@ -84,4 +106,5 @@ class PlantSegDataset(data.Dataset):
             attention_mask = attention_mask.unsqueeze(-1)
             return image, target, sentence, attention_mask, sample['mask']
 
-        return image, target, sentence, attention_mask
+        has_false_healthy = torch.tensor(1 if false_healthy_rel else 0, dtype=torch.float32)
+        return image, target, sentence, attention_mask, false_healthy_mask, has_false_healthy

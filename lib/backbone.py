@@ -353,7 +353,10 @@ class MultiModalSwinTransformer(nn.Module):
                  frozen_stages=-1,
                  use_checkpoint=False,
                  num_heads_fusion=[1, 1, 1, 1],
-                 fusion_drop=0.0
+                 fusion_drop=0.0,
+                 use_hlg=True,
+                 hlg_stages=(3, 4),
+                 hlg_hidden_channels=None
                  ):
         super().__init__()
 
@@ -386,6 +389,7 @@ class MultiModalSwinTransformer(nn.Module):
 
         # build layers
         self.layers = nn.ModuleList()
+        hlg_stage_ids = set(hlg_stages or [])
         for i_layer in range(self.num_layers):
             layer = MMBasicLayer(
                 dim=int(embed_dim * 2 ** i_layer),
@@ -402,7 +406,10 @@ class MultiModalSwinTransformer(nn.Module):
                 downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
                 use_checkpoint=use_checkpoint,
                 num_heads_fusion=num_heads_fusion[i_layer],
-                fusion_drop=fusion_drop
+                fusion_drop=fusion_drop,
+                stage_id=i_layer + 1,
+                use_hlg=use_hlg and (i_layer + 1) in hlg_stage_ids,
+                hlg_hidden_channels=hlg_hidden_channels
             )
             self.layers.append(layer)
 
@@ -460,7 +467,7 @@ class MultiModalSwinTransformer(nn.Module):
         else:
             raise TypeError('pretrained must be a str or None')
 
-    def forward(self, x, l, l_mask):
+    def forward(self, x, l, l_mask, return_aux=False):
         """Forward function."""
         x = self.patch_embed(x)
 
@@ -474,9 +481,10 @@ class MultiModalSwinTransformer(nn.Module):
         x = self.pos_drop(x)
 
         outs = []
+        aux = {}
         for i in range(self.num_layers):
             layer = self.layers[i]
-            x_out, H, W, x, Wh, Ww = layer(x, Wh, Ww, l, l_mask)
+            x_out, H, W, x, Wh, Ww, layer_aux = layer(x, Wh, Ww, l, l_mask)
 
             if i in self.out_indices:
                 norm_layer = getattr(self, f'norm{i}')
@@ -484,7 +492,11 @@ class MultiModalSwinTransformer(nn.Module):
 
                 out = x_out.view(-1, H, W, self.num_features[i]).permute(0, 3, 1, 2).contiguous()
                 outs.append(out)
+            if return_aux and layer_aux:
+                aux.update(layer_aux)
 
+        if return_aux:
+            return tuple(outs), aux
         return tuple(outs)
 
     def train(self, mode=True):
@@ -509,7 +521,10 @@ class MMBasicLayer(nn.Module):
                  downsample=None,
                  use_checkpoint=False,
                  num_heads_fusion=1,
-                 fusion_drop=0.0
+                 fusion_drop=0.0,
+                 stage_id=1,
+                 use_hlg=False,
+                 hlg_hidden_channels=None
                  ):
         super().__init__()
         self.window_size = window_size
@@ -517,6 +532,8 @@ class MMBasicLayer(nn.Module):
         self.depth = depth
         self.use_checkpoint = use_checkpoint
         self.dim = dim
+        self.stage_id = stage_id
+        self.use_hlg = use_hlg
 
         # build blocks
         self.blocks = nn.ModuleList([
@@ -549,6 +566,8 @@ class MMBasicLayer(nn.Module):
             nn.Linear(dim, dim, bias=False),
             nn.Tanh()
         )
+        self.hlg_enabled = use_hlg
+        self.hlg = HealthySuppressedLanguageGate(dim, hidden_channels=hlg_hidden_channels) if self.hlg_enabled else None
         # patch merging layer
         if downsample is not None:
             self.downsample = downsample(dim=dim, norm_layer=norm_layer)
@@ -593,15 +612,45 @@ class MMBasicLayer(nn.Module):
 
         # PWAM fusion
         x_residual = self.fusion(x, l, l_mask)
-        # apply a gate on the residual
-        x = x + (self.res_gate(x_residual) * x_residual)
+        layer_aux = {}
+        # Only stage3/4 replace the original gate generator with HLG.
+        if self.hlg_enabled:
+            visual_2d = x.transpose(1, 2).reshape(x.shape[0], self.dim, H, W).contiguous()
+            fused_2d = x_residual.transpose(1, 2).reshape(x_residual.shape[0], self.dim, H, W).contiguous()
+            gate_map = self.hlg(visual_2d, fused_2d)
+            gate = gate_map.flatten(2).transpose(1, 2).contiguous()
+            x = x + (gate * x_residual)
+            layer_aux[f'hlg_stage{self.stage_id}'] = gate_map
+        else:
+            x = x + (self.res_gate(x_residual) * x_residual)
 
         if self.downsample is not None:
             x_down = self.downsample(x, H, W)
             Wh, Ww = (H + 1) // 2, (W + 1) // 2
-            return x_residual, H, W, x_down, Wh, Ww
+            return x_residual, H, W, x_down, Wh, Ww, layer_aux
         else:
-            return x_residual, H, W, x, H, W
+            return x_residual, H, W, x, H, W, layer_aux
+
+
+class HealthySuppressedLanguageGate(nn.Module):
+    def __init__(self, channels, hidden_channels=None):
+        super().__init__()
+        hidden_channels = hidden_channels or channels
+        self.conv1 = nn.Conv2d(channels * 2, hidden_channels, kernel_size=1, bias=True)
+        self.act1 = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1, bias=True)
+        self.act2 = nn.ReLU(inplace=True)
+        self.conv3 = nn.Conv2d(hidden_channels, channels, kernel_size=1, bias=True)
+        self.out = nn.Tanh()
+
+    def forward(self, visual_feature, fused_feature):
+        gate_input = torch.cat([visual_feature, fused_feature], dim=1)
+        gate = self.conv1(gate_input)
+        gate = self.act1(gate)
+        gate = self.conv2(gate)
+        gate = self.act2(gate)
+        gate = self.conv3(gate)
+        return self.out(gate)
 
 
 class PWAM(nn.Module):
