@@ -16,6 +16,12 @@ def get_parser():
                         help='device for testing or single-GPU training')
     parser.add_argument('--epochs', default=40, type=int, metavar='N', help='number of total epochs to run')
     parser.add_argument('--fusion_drop', default=0.0, type=float, help='dropout rate for PWAMs')
+    parser.add_argument('--fusion_mode', default='pwam', choices=['pwam', 'hapwam'],
+                        help='fusion module to use inside the backbone')
+    parser.add_argument('--hapwam_routing_hidden_dim', default=128, type=int,
+                        help='hidden dimension of the HAPWAM token routing MLP')
+    parser.add_argument('--hapwam_routing_drop', default=0.1, type=float,
+                        help='dropout rate of the HAPWAM token routing MLP')
     parser.add_argument('--img_size', default=480, type=int, help='input image size')
     parser.add_argument("--local_rank", default=-1, type=int, help='local rank for DistributedDataParallel')
     parser.add_argument('--lr', default=0.00005, type=float, help='the initial learning rate')

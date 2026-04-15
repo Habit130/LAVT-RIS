@@ -42,12 +42,18 @@ def _segm_lavt(pretrained, args):
         mha = [1, 1, 1, 1]
 
     out_indices = (0, 1, 2, 3)
+    fusion_mode = getattr(args, 'fusion_mode', 'pwam')
+    hapwam_routing_hidden_dim = getattr(args, 'hapwam_routing_hidden_dim', 128)
+    hapwam_routing_drop = getattr(args, 'hapwam_routing_drop', 0.1)
     backbone = MultiModalSwinTransformer(embed_dim=embed_dim, depths=depths, num_heads=num_heads,
                                          window_size=window_size,
                                          ape=False, drop_path_rate=0.3, patch_norm=True,
                                          out_indices=out_indices,
                                          use_checkpoint=False, num_heads_fusion=mha,
-                                         fusion_drop=args.fusion_drop
+                                         fusion_drop=args.fusion_drop,
+                                         fusion_mode=fusion_mode,
+                                         hapwam_routing_hidden_dim=hapwam_routing_hidden_dim,
+                                         hapwam_routing_drop=hapwam_routing_drop
                                          )
     if pretrained:
         print('Initializing Multi-modal Swin Transformer weights from ' + pretrained)
@@ -111,12 +117,18 @@ def _segm_lavt_one(pretrained, args):
         mha = [1, 1, 1, 1]
 
     out_indices = (0, 1, 2, 3)
+    fusion_mode = getattr(args, 'fusion_mode', 'pwam')
+    hapwam_routing_hidden_dim = getattr(args, 'hapwam_routing_hidden_dim', 128)
+    hapwam_routing_drop = getattr(args, 'hapwam_routing_drop', 0.1)
     backbone = MultiModalSwinTransformer(embed_dim=embed_dim, depths=depths, num_heads=num_heads,
                                          window_size=window_size,
                                          ape=False, drop_path_rate=0.3, patch_norm=True,
                                          out_indices=out_indices,
                                          use_checkpoint=False, num_heads_fusion=mha,
-                                         fusion_drop=args.fusion_drop
+                                         fusion_drop=args.fusion_drop,
+                                         fusion_mode=fusion_mode,
+                                         hapwam_routing_hidden_dim=hapwam_routing_hidden_dim,
+                                         hapwam_routing_drop=hapwam_routing_drop
                                          )
     if pretrained:
         print('Initializing Multi-modal Swin Transformer weights from ' + pretrained)

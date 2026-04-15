@@ -30,6 +30,20 @@ class Mlp(nn.Module):
         return x
 
 
+class TokenRoutingHead(nn.Module):
+    def __init__(self, in_dim=768, hidden_dim=128, dropout=0.1):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 3)
+        )
+
+    def forward(self, x):
+        return self.mlp(x)
+
+
 def window_partition(x, window_size):
     """
     Args:
@@ -353,9 +367,15 @@ class MultiModalSwinTransformer(nn.Module):
                  frozen_stages=-1,
                  use_checkpoint=False,
                  num_heads_fusion=[1, 1, 1, 1],
-                 fusion_drop=0.0
+                 fusion_drop=0.0,
+                 fusion_mode='pwam',
+                 hapwam_routing_hidden_dim=128,
+                 hapwam_routing_drop=0.1
                  ):
         super().__init__()
+
+        if fusion_mode not in ('pwam', 'hapwam'):
+            raise ValueError('Unsupported fusion_mode: {}'.format(fusion_mode))
 
         self.pretrain_img_size = pretrain_img_size
         self.num_layers = len(depths)
@@ -364,6 +384,7 @@ class MultiModalSwinTransformer(nn.Module):
         self.patch_norm = patch_norm
         self.out_indices = out_indices
         self.frozen_stages = frozen_stages
+        self.fusion_mode = fusion_mode
 
         # split image into non-overlapping patches
         self.patch_embed = PatchEmbed(
@@ -384,6 +405,10 @@ class MultiModalSwinTransformer(nn.Module):
         # stochastic depth
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]  # stochastic depth decay rule
 
+        if self.fusion_mode == 'hapwam':
+            self.token_routing_head = TokenRoutingHead(hidden_dim=hapwam_routing_hidden_dim,
+                                                       dropout=hapwam_routing_drop)
+
         # build layers
         self.layers = nn.ModuleList()
         for i_layer in range(self.num_layers):
@@ -402,7 +427,8 @@ class MultiModalSwinTransformer(nn.Module):
                 downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
                 use_checkpoint=use_checkpoint,
                 num_heads_fusion=num_heads_fusion[i_layer],
-                fusion_drop=fusion_drop
+                fusion_drop=fusion_drop,
+                fusion_mode=self.fusion_mode
             )
             self.layers.append(layer)
 
@@ -460,6 +486,19 @@ class MultiModalSwinTransformer(nn.Module):
         else:
             raise TypeError('pretrained must be a str or None')
 
+    def _route_language(self, l, l_mask):
+        l_tokens = l.permute(0, 2, 1).contiguous()
+        routing_logits = self.token_routing_head(l_tokens)
+        routing_weights = F.softmax(routing_logits, dim=-1)
+        token_mask = l_mask.to(dtype=l_tokens.dtype)
+
+        routed_languages = []
+        for group_idx in range(3):
+            routed_tokens = l_tokens * routing_weights[..., group_idx:group_idx + 1] * token_mask
+            routed_languages.append(routed_tokens.permute(0, 2, 1).contiguous())
+
+        return tuple(routed_languages)
+
     def forward(self, x, l, l_mask):
         """Forward function."""
         x = self.patch_embed(x)
@@ -472,6 +511,9 @@ class MultiModalSwinTransformer(nn.Module):
         else:
             x = x.flatten(2).transpose(1, 2)
         x = self.pos_drop(x)
+
+        if self.fusion_mode == 'hapwam':
+            l = self._route_language(l, l_mask)
 
         outs = []
         for i in range(self.num_layers):
@@ -509,7 +551,8 @@ class MMBasicLayer(nn.Module):
                  downsample=None,
                  use_checkpoint=False,
                  num_heads_fusion=1,
-                 fusion_drop=0.0
+                 fusion_drop=0.0,
+                 fusion_mode='pwam'
                  ):
         super().__init__()
         self.window_size = window_size
@@ -517,6 +560,7 @@ class MMBasicLayer(nn.Module):
         self.depth = depth
         self.use_checkpoint = use_checkpoint
         self.dim = dim
+        self.fusion_mode = fusion_mode
 
         # build blocks
         self.blocks = nn.ModuleList([
@@ -535,13 +579,22 @@ class MMBasicLayer(nn.Module):
             for i in range(depth)])
 
         # fuse before downsampling
-        self.fusion = PWAM(dim,  # both the visual input and for combining, num of channels
-                           dim,  # v_in
-                           768,  # l_in
-                           dim,  # key
-                           dim,  # value
-                           num_heads=num_heads_fusion,
-                           dropout=fusion_drop)
+        if self.fusion_mode == 'hapwam':
+            self.fusion = HAPWAM(dim,  # both the visual input and for combining, num of channels
+                                 dim,  # v_in
+                                 768,  # l_in
+                                 dim,  # key
+                                 dim,  # value
+                                 num_heads=num_heads_fusion,
+                                 dropout=fusion_drop)
+        else:
+            self.fusion = PWAM(dim,  # both the visual input and for combining, num of channels
+                               dim,  # v_in
+                               768,  # l_in
+                               dim,  # key
+                               dim,  # value
+                               num_heads=num_heads_fusion,
+                               dropout=fusion_drop)
 
         self.res_gate = nn.Sequential(
             nn.Linear(dim, dim, bias=False),
@@ -639,6 +692,24 @@ class PWAM(nn.Module):
         mm = mm.permute(0, 2, 1)  # (B, H*W, dim)
 
         return mm
+
+
+class HAPWAM(nn.Module):
+    def __init__(self, dim, v_in_channels, l_in_channels, key_channels, value_channels, num_heads=0, dropout=0.0):
+        super(HAPWAM, self).__init__()
+        self.shared_pwam = PWAM(dim, v_in_channels, l_in_channels, key_channels, value_channels,
+                                num_heads=num_heads, dropout=dropout)
+        self.stage_group_logits = nn.Parameter(torch.zeros(3))
+
+    def forward(self, x, l, l_mask):
+        l_sem, l_vis, l_ctx = l
+        fused_sem = self.shared_pwam(x, l_sem, l_mask)
+        fused_vis = self.shared_pwam(x, l_vis, l_mask)
+        fused_ctx = self.shared_pwam(x, l_ctx, l_mask)
+        group_weights = F.softmax(self.stage_group_logits, dim=0)
+        return (group_weights[0] * fused_sem +
+                group_weights[1] * fused_vis +
+                group_weights[2] * fused_ctx)
 
 
 class SpatialImageLanguageAttention(nn.Module):
