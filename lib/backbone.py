@@ -30,6 +30,20 @@ class Mlp(nn.Module):
         return x
 
 
+class TokenRoutingHead(nn.Module):
+    def __init__(self, in_dim=768, hidden_dim=128, dropout=0.1):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 3)
+        )
+
+    def forward(self, x):
+        return self.mlp(x)
+
+
 def window_partition(x, window_size):
     """
     Args:
@@ -331,6 +345,48 @@ class PatchEmbed(nn.Module):
         return x
 
 
+class PlainTextFusion(nn.Module):
+    def __init__(self, dim, l_in_channels, dropout=0.0):
+        super().__init__()
+        self.vis_project = nn.Sequential(
+            nn.Conv1d(dim, dim, 1, 1),
+            nn.GELU(),
+            nn.Dropout(dropout)
+        )
+        self.text_project = nn.Linear(l_in_channels, dim)
+
+    def forward(self, x, l, l_mask):
+        vis = self.vis_project(x.permute(0, 2, 1)).permute(0, 2, 1).contiguous()
+        l_tokens = l.permute(0, 2, 1).contiguous()
+        token_mask = l_mask.to(dtype=l_tokens.dtype)
+        pooled = (l_tokens * token_mask).sum(dim=1)
+        denom = token_mask.sum(dim=1).clamp_min(1.0)
+        global_text = pooled / denom
+        projected_text = self.text_project(global_text).unsqueeze(1)
+        return vis * projected_text
+
+
+class HealthySuppressedLanguageGate(nn.Module):
+    def __init__(self, channels, hidden_channels=None):
+        super().__init__()
+        hidden_channels = hidden_channels or channels
+        self.conv1 = nn.Conv2d(channels * 2, hidden_channels, kernel_size=1, bias=True)
+        self.act1 = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1, bias=True)
+        self.act2 = nn.ReLU(inplace=True)
+        self.conv3 = nn.Conv2d(hidden_channels, channels, kernel_size=1, bias=True)
+        self.out = nn.Tanh()
+
+    def forward(self, visual_feature, fused_feature):
+        gate_input = torch.cat([visual_feature, fused_feature], dim=1)
+        gate = self.conv1(gate_input)
+        gate = self.act1(gate)
+        gate = self.conv2(gate)
+        gate = self.act2(gate)
+        gate = self.conv3(gate)
+        return self.out(gate)
+
+
 class MultiModalSwinTransformer(nn.Module):
     def __init__(self,
                  pretrain_img_size=224,
@@ -353,9 +409,22 @@ class MultiModalSwinTransformer(nn.Module):
                  frozen_stages=-1,
                  use_checkpoint=False,
                  num_heads_fusion=[1, 1, 1, 1],
-                 fusion_drop=0.0
+                 fusion_drop=0.0,
+                 align_module='none',
+                 gate_module='none',
+                 hapwam_hidden_dim=128,
+                 hapwam_dropout=0.1,
+                 hlg_hidden_channels=None,
+                 hlg_stages=(3, 4)
                  ):
         super().__init__()
+
+        if align_module not in ('none', 'plain', 'pwam', 'hapwam'):
+            raise ValueError('Unsupported align_module: {}'.format(align_module))
+        if gate_module not in ('none', 'lg', 'hlg'):
+            raise ValueError('Unsupported gate_module: {}'.format(gate_module))
+        if gate_module in ('lg', 'hlg') and align_module == 'none':
+            raise ValueError('gate_module={} requires align_module to be one of plain/pwam/hapwam'.format(gate_module))
 
         self.pretrain_img_size = pretrain_img_size
         self.num_layers = len(depths)
@@ -364,6 +433,9 @@ class MultiModalSwinTransformer(nn.Module):
         self.patch_norm = patch_norm
         self.out_indices = out_indices
         self.frozen_stages = frozen_stages
+        self.align_module = align_module
+        self.gate_module = gate_module
+        self.hlg_stage_ids = set(hlg_stages or [])
 
         # split image into non-overlapping patches
         self.patch_embed = PatchEmbed(
@@ -384,6 +456,10 @@ class MultiModalSwinTransformer(nn.Module):
         # stochastic depth
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]  # stochastic depth decay rule
 
+        if self.align_module == 'hapwam':
+            self.token_routing_head = TokenRoutingHead(hidden_dim=hapwam_hidden_dim,
+                                                       dropout=hapwam_dropout)
+
         # build layers
         self.layers = nn.ModuleList()
         for i_layer in range(self.num_layers):
@@ -402,7 +478,12 @@ class MultiModalSwinTransformer(nn.Module):
                 downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
                 use_checkpoint=use_checkpoint,
                 num_heads_fusion=num_heads_fusion[i_layer],
-                fusion_drop=fusion_drop
+                fusion_drop=fusion_drop,
+                align_module=align_module,
+                gate_module=gate_module,
+                stage_id=i_layer + 1,
+                hlg_hidden_channels=hlg_hidden_channels,
+                hlg_stages=self.hlg_stage_ids
             )
             self.layers.append(layer)
 
@@ -460,7 +541,23 @@ class MultiModalSwinTransformer(nn.Module):
         else:
             raise TypeError('pretrained must be a str or None')
 
-    def forward(self, x, l, l_mask):
+    def _route_language(self, l, l_mask):
+        l_tokens = l.permute(0, 2, 1).contiguous()
+        routing_logits = self.token_routing_head(l_tokens)
+        if routing_logits.dim() != 3 or routing_logits.size(-1) != 3:
+            raise RuntimeError('HAPWAM routing logits must have shape [B, T, 3], got {}'.format(
+                tuple(routing_logits.shape)))
+        routing_weights = F.softmax(routing_logits, dim=-1)
+        token_mask = l_mask.to(dtype=l_tokens.dtype)
+
+        routed_languages = []
+        for group_idx in range(3):
+            routed_tokens = l_tokens * routing_weights[..., group_idx:group_idx + 1] * token_mask
+            routed_languages.append(routed_tokens.permute(0, 2, 1).contiguous())
+
+        return tuple(routed_languages)
+
+    def forward(self, x, l, l_mask, return_aux=False):
         """Forward function."""
         x = self.patch_embed(x)
 
@@ -473,10 +570,13 @@ class MultiModalSwinTransformer(nn.Module):
             x = x.flatten(2).transpose(1, 2)
         x = self.pos_drop(x)
 
+        routed_language = self._route_language(l, l_mask) if self.align_module == 'hapwam' else l
+
         outs = []
+        aux = {}
         for i in range(self.num_layers):
             layer = self.layers[i]
-            x_out, H, W, x, Wh, Ww = layer(x, Wh, Ww, l, l_mask)
+            x_out, H, W, x, Wh, Ww, layer_aux = layer(x, Wh, Ww, routed_language, l_mask)
 
             if i in self.out_indices:
                 norm_layer = getattr(self, f'norm{i}')
@@ -484,7 +584,11 @@ class MultiModalSwinTransformer(nn.Module):
 
                 out = x_out.view(-1, H, W, self.num_features[i]).permute(0, 3, 1, 2).contiguous()
                 outs.append(out)
+            if return_aux and layer_aux:
+                aux.update(layer_aux)
 
+        if return_aux:
+            return tuple(outs), aux
         return tuple(outs)
 
     def train(self, mode=True):
@@ -509,7 +613,12 @@ class MMBasicLayer(nn.Module):
                  downsample=None,
                  use_checkpoint=False,
                  num_heads_fusion=1,
-                 fusion_drop=0.0
+                 fusion_drop=0.0,
+                 align_module='none',
+                 gate_module='none',
+                 stage_id=1,
+                 hlg_hidden_channels=None,
+                 hlg_stages=(3, 4)
                  ):
         super().__init__()
         self.window_size = window_size
@@ -517,6 +626,10 @@ class MMBasicLayer(nn.Module):
         self.depth = depth
         self.use_checkpoint = use_checkpoint
         self.dim = dim
+        self.align_module = align_module
+        self.gate_module = gate_module
+        self.stage_id = stage_id
+        self.hlg_stages = set(hlg_stages or [])
 
         # build blocks
         self.blocks = nn.ModuleList([
@@ -534,14 +647,14 @@ class MMBasicLayer(nn.Module):
                 norm_layer=norm_layer)
             for i in range(depth)])
 
-        # fuse before downsampling
-        self.fusion = PWAM(dim,  # both the visual input and for combining, num of channels
-                           dim,  # v_in
-                           768,  # l_in
-                           dim,  # key
-                           dim,  # value
-                           num_heads=num_heads_fusion,
-                           dropout=fusion_drop)
+        if align_module == 'plain':
+            self.fusion = PlainTextFusion(dim, 768, dropout=fusion_drop)
+        elif align_module == 'pwam':
+            self.fusion = PWAM(dim, dim, 768, dim, dim, num_heads=num_heads_fusion, dropout=fusion_drop)
+        elif align_module == 'hapwam':
+            self.fusion = HAPWAM(dim, dim, 768, dim, dim, num_heads=num_heads_fusion, dropout=fusion_drop)
+        else:
+            self.fusion = None
 
         self.res_gate = nn.Sequential(
             nn.Linear(dim, dim, bias=False),
@@ -549,6 +662,8 @@ class MMBasicLayer(nn.Module):
             nn.Linear(dim, dim, bias=False),
             nn.Tanh()
         )
+        self.hlg = HealthySuppressedLanguageGate(dim, hidden_channels=hlg_hidden_channels) \
+            if gate_module == 'hlg' and stage_id in self.hlg_stages else None
         # patch merging layer
         if downsample is not None:
             self.downsample = downsample(dim=dim, norm_layer=norm_layer)
@@ -591,17 +706,41 @@ class MMBasicLayer(nn.Module):
             else:
                 x = blk(x, attn_mask)  # output of a Block has shape (B, H*W, dim)
 
-        # PWAM fusion
-        x_residual = self.fusion(x, l, l_mask)
-        # apply a gate on the residual
-        x = x + (self.res_gate(x_residual) * x_residual)
+        visual_feature = x
+        aligned_feature = self.fusion(visual_feature, l, l_mask) if self.fusion is not None else None
+        if aligned_feature is not None and aligned_feature.shape != visual_feature.shape:
+            raise RuntimeError('Aligned feature shape {} does not match visual feature shape {}'.format(
+                tuple(aligned_feature.shape), tuple(visual_feature.shape)))
+
+        layer_output = aligned_feature if aligned_feature is not None else visual_feature
+        layer_aux = {}
+
+        if self.gate_module == 'none' or aligned_feature is None:
+            updated_feature = visual_feature if aligned_feature is None else visual_feature + aligned_feature
+        elif self.gate_module == 'lg':
+            updated_feature = visual_feature + (self.res_gate(aligned_feature) * aligned_feature)
+        elif self.gate_module == 'hlg':
+            if self.stage_id in self.hlg_stages:
+                visual_2d = visual_feature.transpose(1, 2).reshape(visual_feature.shape[0], self.dim, H, W).contiguous()
+                aligned_2d = aligned_feature.transpose(1, 2).reshape(aligned_feature.shape[0], self.dim, H, W).contiguous()
+                gate_map = self.hlg(visual_2d, aligned_2d)
+                if gate_map.shape != visual_2d.shape:
+                    raise RuntimeError('HLG gate shape {} does not match visual feature shape {}'.format(
+                        tuple(gate_map.shape), tuple(visual_2d.shape)))
+                gate = gate_map.flatten(2).transpose(1, 2).contiguous()
+                updated_feature = visual_feature + (gate * aligned_feature)
+                layer_aux['hlg_stage{}'.format(self.stage_id)] = gate_map
+            else:
+                updated_feature = visual_feature + aligned_feature
+        else:
+            raise ValueError('Unsupported gate_module: {}'.format(self.gate_module))
 
         if self.downsample is not None:
-            x_down = self.downsample(x, H, W)
+            x_down = self.downsample(updated_feature, H, W)
             Wh, Ww = (H + 1) // 2, (W + 1) // 2
-            return x_residual, H, W, x_down, Wh, Ww
+            return layer_output, H, W, x_down, Wh, Ww, layer_aux
         else:
-            return x_residual, H, W, x, H, W
+            return layer_output, H, W, updated_feature, H, W, layer_aux
 
 
 class PWAM(nn.Module):
@@ -639,6 +778,26 @@ class PWAM(nn.Module):
         mm = mm.permute(0, 2, 1)  # (B, H*W, dim)
 
         return mm
+
+
+class HAPWAM(nn.Module):
+    def __init__(self, dim, v_in_channels, l_in_channels, key_channels, value_channels, num_heads=0, dropout=0.0):
+        super(HAPWAM, self).__init__()
+        self.shared_pwam = PWAM(dim, v_in_channels, l_in_channels, key_channels, value_channels,
+                                num_heads=num_heads, dropout=dropout)
+        self.stage_group_logits = nn.Parameter(torch.zeros(3))
+
+    def forward(self, x, l, l_mask):
+        if not isinstance(l, (tuple, list)) or len(l) != 3:
+            raise RuntimeError('HAPWAM expects a 3-way routed language tuple, got {}'.format(type(l).__name__))
+        l_sem, l_vis, l_ctx = l
+        fused_sem = self.shared_pwam(x, l_sem, l_mask)
+        fused_vis = self.shared_pwam(x, l_vis, l_mask)
+        fused_ctx = self.shared_pwam(x, l_ctx, l_mask)
+        group_weights = F.softmax(self.stage_group_logits, dim=0)
+        return (group_weights[0] * fused_sem +
+                group_weights[1] * fused_vis +
+                group_weights[2] * fused_ctx)
 
 
 class SpatialImageLanguageAttention(nn.Module):

@@ -13,6 +13,10 @@ import utils
 import numpy as np
 
 
+def allow_partial_checkpoint_load(args):
+    return getattr(args, 'align_module', 'none') in ('plain', 'hapwam') or getattr(args, 'gate_module', 'none') == 'hlg'
+
+
 def get_dataset(image_set, transform, args):
     if args.dataset == 'plantseg':
         from data.dataset_plantseg import PlantSegDataset
@@ -158,9 +162,12 @@ def main(args):
     data_loader_test = torch.utils.data.DataLoader(dataset_test, batch_size=1,
                                                    sampler=test_sampler, num_workers=args.workers)
     print(args.model)
-    single_model = segmentation.__dict__[args.model](pretrained='',args=args)
+    single_model = segmentation.__dict__[args.model](pretrained='', args=args)
     checkpoint = torch.load(args.resume, map_location='cpu')
-    single_model.load_state_dict(checkpoint['model'])
+    utils.load_state_dict_with_fallback(single_model,
+                                        checkpoint['model'],
+                                        strict=not allow_partial_checkpoint_load(args),
+                                        description='model')
     model = single_model.to(device)
 
     if args.model != 'lavt_one':
@@ -169,7 +176,10 @@ def main(args):
         # work-around for a transformers bug; need to update to a newer version of transformers to remove these two lines
         if args.ddp_trained_weights:
             single_bert_model.pooler = None
-        single_bert_model.load_state_dict(checkpoint['bert_model'])
+        utils.load_state_dict_with_fallback(single_bert_model,
+                                            checkpoint['bert_model'],
+                                            strict=True,
+                                            description='bert_model')
         bert_model = single_bert_model.to(device)
     else:
         bert_model = None
@@ -178,8 +188,8 @@ def main(args):
 
 
 if __name__ == "__main__":
-    from args import get_parser
+    from args import get_parser, validate_args
     parser = get_parser()
-    args = parser.parse_args()
+    args = validate_args(parser.parse_args())
     print('Image size: {}'.format(str(args.img_size)))
     main(args)

@@ -15,7 +15,23 @@ def get_parser():
     parser.add_argument('--device', default='cuda:0',
                         help='device for testing or single-GPU training')
     parser.add_argument('--epochs', default=40, type=int, metavar='N', help='number of total epochs to run')
+    parser.add_argument('--align_module', default='none', choices=['none', 'plain', 'pwam', 'hapwam'],
+                        help='stage-level language alignment module')
     parser.add_argument('--fusion_drop', default=0.0, type=float, help='dropout rate for PWAMs')
+    parser.add_argument('--gate_module', default='none', choices=['none', 'lg', 'hlg'],
+                        help='gate module applied after stage-level language alignment')
+    parser.add_argument('--hapwam_hidden_dim', default=128, type=int,
+                        help='hidden dimension of the HAPWAM token routing MLP')
+    parser.add_argument('--hapwam_dropout', default=0.1, type=float,
+                        help='dropout rate of the HAPWAM token routing MLP')
+    parser.add_argument('--hlg_aux_loss_weight', default=0.2, type=float,
+                        help='weight for the summed HLG auxiliary loss')
+    parser.add_argument('--hlg_false_healthy_weight', default=2.0, type=float,
+                        help='weight for false-healthy suppression inside each HLG stage loss')
+    parser.add_argument('--hlg_hidden_channels', default=None, type=int,
+                        help='hidden channels for HLG; defaults to the stage channel dimension when omitted')
+    parser.add_argument('--hlg_stages', default=[3, 4], nargs='+', type=int,
+                        help='1-based stage ids that use HLG when gate_module=hlg; only stages 3 and 4 are supported')
     parser.add_argument('--img_size', default=480, type=int, help='input image size')
     parser.add_argument("--local_rank", default=-1, type=int, help='local rank for DistributedDataParallel')
     parser.add_argument('--lr', default=0.00005, type=float, help='the initial learning rate')
@@ -53,6 +69,24 @@ def get_parser():
     return parser
 
 
+def validate_args(args):
+    align_module = getattr(args, 'align_module', 'none')
+    gate_module = getattr(args, 'gate_module', 'none')
+    hlg_stages = tuple(getattr(args, 'hlg_stages', [3, 4]))
+
+    if gate_module in ('lg', 'hlg') and align_module == 'none':
+        raise ValueError('gate_module={} requires align_module to be one of plain/pwam/hapwam'.format(gate_module))
+
+    if gate_module == 'hlg':
+        invalid_hlg_stages = [stage for stage in hlg_stages if stage not in (3, 4)]
+        if invalid_hlg_stages:
+            raise ValueError('gate_module=hlg only supports stages 3 and 4, got {}'.format(invalid_hlg_stages))
+        if not hlg_stages:
+            raise ValueError('gate_module=hlg requires at least one stage id in --hlg_stages')
+
+    return args
+
+
 if __name__ == "__main__":
     parser = get_parser()
-    args_dict = parser.parse_args()
+    args_dict = validate_args(parser.parse_args())

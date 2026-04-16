@@ -43,6 +43,7 @@ attention_mask = attention_mask.to(device)  # for inference (input)
 # initialize model and load weights
 from bert.modeling_bert import BertModel
 from lib import segmentation
+from utils import load_state_dict_with_fallback
 
 # construct a mini args class; like from a config file
 
@@ -52,6 +53,12 @@ class args:
     window12 = True
     mha = ''
     fusion_drop = 0.0
+    align_module = 'pwam'
+    gate_module = 'lg'
+    hapwam_hidden_dim = 128
+    hapwam_dropout = 0.1
+    hlg_hidden_channels = None
+    hlg_stages = [3, 4]
 
 
 single_model = segmentation.__dict__['lavt'](pretrained='', args=args)
@@ -61,8 +68,8 @@ single_bert_model = model_class.from_pretrained('bert-base-uncased')
 single_bert_model.pooler = None
 
 checkpoint = torch.load(weights, map_location='cpu')
-single_bert_model.load_state_dict(checkpoint['bert_model'])
-single_model.load_state_dict(checkpoint['model'])
+load_state_dict_with_fallback(single_bert_model, checkpoint['bert_model'], strict=True, description='bert_model')
+load_state_dict_with_fallback(single_model, checkpoint['model'], strict=True, description='model')
 model = single_model.to(device)
 bert_model = single_bert_model.to(device)
 

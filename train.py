@@ -7,6 +7,7 @@ from functools import reduce
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import torch.utils.data
 from torch import nn
 
@@ -62,13 +63,89 @@ def criterion(input_tensor, target):
     return nn.functional.cross_entropy(input_tensor, target, weight=weight)
 
 
-def forward_model(model, bert_model, image, sentences, attentions):
+def unpack_batch(data):
+    if len(data) == 6:
+        image, target, sentences, attentions, false_healthy_mask, has_false_healthy = data
+    else:
+        image, target, sentences, attentions = data
+        false_healthy_mask = None
+        has_false_healthy = None
+    return image, target, sentences, attentions, false_healthy_mask, has_false_healthy
+
+
+def compute_gate_losses(aux_outputs, disease_mask, false_healthy_mask, has_false_healthy, false_healthy_weight):
+    zero = torch.zeros((), device=disease_mask.device, dtype=torch.float32)
+    if not aux_outputs or false_healthy_mask is None or has_false_healthy is None:
+        return {
+            'gate_loss': zero,
+            'gate_disease_loss': zero,
+            'gate_false_healthy_loss': zero,
+            'gate_stage3_mean': zero,
+            'gate_stage4_mean': zero,
+        }
+
+    disease_mask = disease_mask.unsqueeze(1).float()
+    false_healthy_mask = false_healthy_mask.unsqueeze(1).float()
+    sample_valid = has_false_healthy.float().view(-1, 1, 1, 1)
+
+    gate_loss = zero
+    gate_disease_loss = zero
+    gate_false_healthy_loss = zero
+    stage_means = {
+        'gate_stage3_mean': zero,
+        'gate_stage4_mean': zero,
+    }
+
+    for stage_name in ('hlg_stage3', 'hlg_stage4'):
+        gate_tensor = aux_outputs.get(stage_name)
+        if gate_tensor is None:
+            continue
+
+        gate_map = gate_tensor.mean(dim=1, keepdim=True)
+        disease_i = F.interpolate(disease_mask, size=gate_map.shape[-2:], mode='nearest')
+        false_healthy_i = F.interpolate(false_healthy_mask, size=gate_map.shape[-2:], mode='nearest')
+
+        disease_pos = (disease_i > 0.5).float()
+        false_pos = (false_healthy_i > 0.5).float()
+
+        pos_target = torch.ones_like(gate_map)
+        per_pixel_dis = (gate_map - pos_target) ** 2
+        loss_dis_i = (per_pixel_dis * disease_pos).sum() / (disease_pos.sum() + 1e-6)
+
+        neg_target = -torch.ones_like(gate_map)
+        per_pixel_fh = (gate_map - neg_target) ** 2
+        valid_false_pos = false_pos * sample_valid
+        loss_fh_i = (per_pixel_fh * valid_false_pos).sum() / (valid_false_pos.sum() + 1e-6)
+
+        gate_loss = gate_loss + loss_dis_i + false_healthy_weight * loss_fh_i
+        gate_disease_loss = gate_disease_loss + loss_dis_i
+        gate_false_healthy_loss = gate_false_healthy_loss + loss_fh_i
+        stage_means[f'gate_{stage_name.split("_")[-1]}_mean'] = gate_map.mean().detach()
+
+    return {
+        'gate_loss': gate_loss,
+        'gate_disease_loss': gate_disease_loss,
+        'gate_false_healthy_loss': gate_false_healthy_loss,
+        'gate_stage3_mean': stage_means['gate_stage3_mean'],
+        'gate_stage4_mean': stage_means['gate_stage4_mean'],
+    }
+
+
+def should_return_aux(args):
+    return getattr(args, 'gate_module', 'none') == 'hlg'
+
+
+def allow_partial_checkpoint_load(args):
+    return getattr(args, 'align_module', 'none') in ('plain', 'hapwam') or getattr(args, 'gate_module', 'none') == 'hlg'
+
+
+def forward_model(model, bert_model, image, sentences, attentions, return_aux=False):
     if bert_model is not None:
         last_hidden_states = bert_model(sentences, attention_mask=attentions)[0]
         embedding = last_hidden_states.permute(0, 2, 1)
-        output = model(image, embedding, l_mask=attentions.unsqueeze(dim=-1))
+        output = model(image, embedding, l_mask=attentions.unsqueeze(dim=-1), return_aux=return_aux)
         return output
-    return model(image, sentences, l_mask=attentions)
+    return model(image, sentences, l_mask=attentions, return_aux=return_aux)
 
 
 def evaluate(model, data_loader, bert_model, device, args):
@@ -80,7 +157,7 @@ def evaluate(model, data_loader, bert_model, device, args):
         meter = metrics.BinarySegmentationMeter()
         with torch.no_grad():
             for data in metric_logger.log_every(data_loader, 100, header):
-                image, target, sentences, attentions = data
+                image, target, sentences, attentions, _, _ = unpack_batch(data)
                 image = image.to(device, non_blocking=device.type == 'cuda')
                 target = target.to(device, non_blocking=device.type == 'cuda')
                 sentences = sentences.to(device, non_blocking=device.type == 'cuda').squeeze(1)
@@ -105,7 +182,7 @@ def evaluate(model, data_loader, bert_model, device, args):
     with torch.no_grad():
         for data in metric_logger.log_every(data_loader, 100, header):
             total_its += 1
-            image, target, sentences, attentions = data
+            image, target, sentences, attentions, _, _ = unpack_batch(data)
             image = image.to(device, non_blocking=device.type == 'cuda')
             target = target.to(device, non_blocking=device.type == 'cuda')
             sentences = sentences.to(device, non_blocking=device.type == 'cuda').squeeze(1)
@@ -138,7 +215,7 @@ def evaluate(model, data_loader, bert_model, device, args):
 
 
 def train_one_epoch(model, criterion_fn, optimizer, data_loader, lr_scheduler, epoch, print_freq,
-                    iterations, bert_model, device):
+                    iterations, bert_model, device, args):
     model.train()
     if bert_model is not None:
         bert_model.train()
@@ -148,14 +225,24 @@ def train_one_epoch(model, criterion_fn, optimizer, data_loader, lr_scheduler, e
     header = 'Epoch: [{}]'.format(epoch)
 
     for data in metric_logger.log_every(data_loader, print_freq, header):
-        image, target, sentences, attentions = data
+        image, target, sentences, attentions, false_healthy_mask, has_false_healthy = unpack_batch(data)
         image = image.to(device, non_blocking=device.type == 'cuda')
         target = target.to(device, non_blocking=device.type == 'cuda')
         sentences = sentences.to(device, non_blocking=device.type == 'cuda').squeeze(1)
         attentions = attentions.to(device, non_blocking=device.type == 'cuda').squeeze(1)
+        if false_healthy_mask is not None:
+            false_healthy_mask = false_healthy_mask.to(device, non_blocking=device.type == 'cuda')
+            has_false_healthy = has_false_healthy.to(device, non_blocking=device.type == 'cuda')
 
-        output = forward_model(model, bert_model, image, sentences, attentions)
-        loss = criterion_fn(output, target)
+        if should_return_aux(args):
+            output, aux_outputs = forward_model(model, bert_model, image, sentences, attentions, return_aux=True)
+        else:
+            output = forward_model(model, bert_model, image, sentences, attentions)
+            aux_outputs = {}
+        seg_loss = criterion_fn(output, target)
+        gate_losses = compute_gate_losses(aux_outputs, target, false_healthy_mask, has_false_healthy,
+                                          args.hlg_false_healthy_weight)
+        loss = seg_loss + args.hlg_aux_loss_weight * gate_losses['gate_loss']
 
         optimizer.zero_grad()
         loss.backward()
@@ -166,9 +253,17 @@ def train_one_epoch(model, criterion_fn, optimizer, data_loader, lr_scheduler, e
             torch.cuda.synchronize()
 
         iterations += 1
-        metric_logger.update(loss=loss.item(), lr=optimizer.param_groups[0]["lr"])
+        metric_logger.update(loss=loss.item(),
+                             seg_loss=seg_loss.item(),
+                             gate_loss=gate_losses['gate_loss'].item(),
+                             gate_disease_loss=gate_losses['gate_disease_loss'].item(),
+                             gate_false_healthy_loss=gate_losses['gate_false_healthy_loss'].item(),
+                             gate_stage3_mean=gate_losses['gate_stage3_mean'].item(),
+                             gate_stage4_mean=gate_losses['gate_stage4_mean'].item(),
+                             lr=optimizer.param_groups[0]["lr"])
 
-        del image, target, sentences, attentions, loss, output, data
+        del image, target, sentences, attentions, false_healthy_mask, has_false_healthy
+        del seg_loss, gate_losses, loss, output, aux_outputs, data
         gc.collect()
         if device.type == 'cuda':
             torch.cuda.empty_cache()
@@ -221,9 +316,15 @@ def main(args):
 
     if args.resume:
         checkpoint = torch.load(args.resume, map_location='cpu')
-        single_model.load_state_dict(checkpoint['model'])
+        utils.load_state_dict_with_fallback(single_model,
+                                            checkpoint['model'],
+                                            strict=not allow_partial_checkpoint_load(args),
+                                            description='model')
         if args.model != 'lavt_one':
-            single_bert_model.load_state_dict(checkpoint['bert_model'])
+            utils.load_state_dict_with_fallback(single_bert_model,
+                                                checkpoint['bert_model'],
+                                                strict=True,
+                                                description='bert_model')
 
     backbone_no_decay = []
     backbone_decay = []
@@ -275,7 +376,7 @@ def main(args):
             data_loader.sampler.set_epoch(epoch)
 
         train_one_epoch(model, criterion, optimizer, data_loader, lr_scheduler, epoch,
-                        args.print_freq, iterations, bert_model, device)
+                        args.print_freq, iterations, bert_model, device, args)
         validation_result = evaluate(model, data_loader_val, bert_model, device, args)
 
         if args.dataset == 'plantseg':
@@ -318,10 +419,10 @@ def main(args):
 
 
 if __name__ == "__main__":
-    from args import get_parser
+    from args import get_parser, validate_args
 
     parser = get_parser()
-    args = parser.parse_args()
+    args = validate_args(parser.parse_args())
     utils.init_distributed_mode(args)
     print('Image size: {}'.format(str(args.img_size)))
     main(args)

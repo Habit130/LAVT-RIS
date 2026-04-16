@@ -202,6 +202,26 @@ def save_on_master(*args, **kwargs):
         torch.save(*args, **kwargs)
 
 
+def load_state_dict_with_fallback(module, state_dict, strict=True, description='module'):
+    try:
+        incompat = module.load_state_dict(state_dict, strict=strict)
+        if strict:
+            return incompat
+    except RuntimeError:
+        if strict:
+            raise
+        incompat = module.load_state_dict(state_dict, strict=False)
+
+    missing_keys = list(getattr(incompat, 'missing_keys', []))
+    unexpected_keys = list(getattr(incompat, 'unexpected_keys', []))
+    print('Loaded {} with strict=False'.format(description))
+    if missing_keys:
+        print('Missing keys ({}): {}'.format(description, missing_keys))
+    if unexpected_keys:
+        print('Unexpected keys ({}): {}'.format(description, unexpected_keys))
+    return incompat
+
+
 def init_distributed_mode(args):
     args.distributed = False
 
