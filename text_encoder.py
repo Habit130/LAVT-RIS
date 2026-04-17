@@ -46,7 +46,7 @@ def build_text_tokenizer(args):
             DebertaV2TokenizerFast = _import_transformers_attr('transformers', 'DebertaV2TokenizerFast')
 
             return DebertaV2TokenizerFast.from_pretrained(tokenizer_name)
-        except (OSError, ValueError):
+        except (ImportError, OSError, ValueError):
             DebertaV2Tokenizer = _import_transformers_attr('transformers', 'DebertaV2Tokenizer')
 
             return DebertaV2Tokenizer.from_pretrained(tokenizer_name)
@@ -56,7 +56,7 @@ def build_text_tokenizer(args):
             BertTokenizerFast = _import_transformers_attr('transformers', 'BertTokenizerFast')
 
             return BertTokenizerFast.from_pretrained(tokenizer_name)
-        except (OSError, ValueError):
+        except (ImportError, OSError, ValueError):
             BertTokenizer = _import_transformers_attr('transformers', 'BertTokenizer')
 
             return BertTokenizer.from_pretrained(tokenizer_name)
