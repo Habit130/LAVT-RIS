@@ -1,23 +1,12 @@
 import os
-import sys
 import torch.utils.data as data
 import torch
-from torchvision import transforms
-from torch.autograd import Variable
 import numpy as np
 from PIL import Image
-import torchvision.transforms.functional as TF
-import random
 
-import h5py
 from refer.refer import REFER
 
-from args import get_parser
 from text_encoder import build_text_tokenizer, tokenize_text
-
-# Dataset configuration initialization
-parser = get_parser()
-args = parser.parse_args()
 
 
 class ReferDataset(data.Dataset):

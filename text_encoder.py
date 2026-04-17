@@ -7,6 +7,19 @@ LEGACY_BERT_MODEL_KEY = 'bert_model'
 TEXT_ENCODER_MODEL_KEY = 'text_encoder'
 
 
+def _import_transformers_attr(module_name, attr_name):
+    try:
+        module = __import__('transformers', fromlist=[attr_name])
+        return getattr(module, attr_name)
+    except Exception as exc:
+        raise RuntimeError(
+            'Failed to import transformers component [{}] for text encoder setup. '
+            'Make sure the active environment installs `transformers`, `sentencepiece`, and uses `numpy<2`. '
+            'Recommended fix on the server: `conda env update -f environment.server.yml --prune`.'
+            .format(attr_name)
+        ) from exc
+
+
 def _normalize_model_name(name):
     if not name:
         return ''
@@ -14,7 +27,7 @@ def _normalize_model_name(name):
 
 
 def prepare_text_encoder_args(args):
-    from transformers import AutoConfig
+    AutoConfig = _import_transformers_attr('transformers', 'AutoConfig')
 
     config = AutoConfig.from_pretrained(args.text_encoder_name)
     args.text_hidden_size = get_text_hidden_size(config)
@@ -30,44 +43,44 @@ def build_text_tokenizer(args):
 
     if model_type == 'deberta-v2':
         try:
-            from transformers import DebertaV2TokenizerFast
+            DebertaV2TokenizerFast = _import_transformers_attr('transformers', 'DebertaV2TokenizerFast')
 
             return DebertaV2TokenizerFast.from_pretrained(tokenizer_name)
-        except Exception:
-            from transformers import DebertaV2Tokenizer
+        except (OSError, ValueError):
+            DebertaV2Tokenizer = _import_transformers_attr('transformers', 'DebertaV2Tokenizer')
 
             return DebertaV2Tokenizer.from_pretrained(tokenizer_name)
 
     if model_type == 'bert':
         try:
-            from transformers import BertTokenizerFast
+            BertTokenizerFast = _import_transformers_attr('transformers', 'BertTokenizerFast')
 
             return BertTokenizerFast.from_pretrained(tokenizer_name)
-        except Exception:
-            from transformers import BertTokenizer
+        except (OSError, ValueError):
+            BertTokenizer = _import_transformers_attr('transformers', 'BertTokenizer')
 
             return BertTokenizer.from_pretrained(tokenizer_name)
 
-    from transformers import AutoTokenizer
+    AutoTokenizer = _import_transformers_attr('transformers', 'AutoTokenizer')
 
     return AutoTokenizer.from_pretrained(tokenizer_name)
 
 
 def build_text_encoder(args, config=None):
-    from transformers import AutoConfig
+    AutoConfig = _import_transformers_attr('transformers', 'AutoConfig')
 
     if config is None:
         config = AutoConfig.from_pretrained(args.text_encoder_name)
     if getattr(config, 'model_type', '') == 'deberta-v2':
-        from transformers import DebertaV2Model
+        DebertaV2Model = _import_transformers_attr('transformers', 'DebertaV2Model')
 
         model = DebertaV2Model.from_pretrained(args.text_encoder_name, config=config)
     elif getattr(config, 'model_type', '') == 'bert':
-        from transformers import BertModel
+        BertModel = _import_transformers_attr('transformers', 'BertModel')
 
         model = BertModel.from_pretrained(args.text_encoder_name, config=config)
     else:
-        from transformers import AutoModel
+        AutoModel = _import_transformers_attr('transformers', 'AutoModel')
 
         model = AutoModel.from_pretrained(args.text_encoder_name, config=config)
     if hasattr(model, 'pooler'):
