@@ -7,15 +7,13 @@ ENV_NAME="${ENV_NAME:-lavt-plantseg}"
 CONDA_SH="${CONDA_SH:-/usr/local/miniconda3/etc/profile.d/conda.sh}"
 PLANTSEG_ROOT="${PLANTSEG_ROOT:-$REPO_ROOT/../plantseg}"
 WEIGHTS_DIR="${WEIGHTS_DIR:-$REPO_ROOT/pretrained_weights}"
-BERT_DIR="${BERT_DIR:-$WEIGHTS_DIR/bert-base-uncased}"
 SWIN_PATH="${SWIN_PATH:-$WEIGHTS_DIR/swin_base_patch4_window12_384_22k.pth}"
 MODEL_ID="${MODEL_ID:-plantseg_lavt_one_cap2}"
 MASK_SAVE_DIR="${MASK_SAVE_DIR:-$REPO_ROOT/pred_masks_cap2}"
+TEXT_ENCODER_NAME="${TEXT_ENCODER_NAME:-microsoft/deberta-v3-base}"
+MAX_TEXT_TOKENS="${MAX_TEXT_TOKENS:-64}"
 
 SWIN_URL="https://github.com/SwinTransformer/storage/releases/download/v1.0.0/swin_base_patch4_window12_384_22k.pth"
-BERT_MODEL_URL="https://huggingface.co/bert-base-uncased/resolve/main/pytorch_model.bin"
-BERT_CONFIG_URL="https://huggingface.co/bert-base-uncased/resolve/main/config.json"
-BERT_VOCAB_URL="https://huggingface.co/bert-base-uncased/resolve/main/vocab.txt"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -84,11 +82,8 @@ main() {
   conda activate "$ENV_NAME"
   conda install -y numpy=1.26.4
 
-  mkdir -p "$WEIGHTS_DIR" "$BERT_DIR"
+  mkdir -p "$WEIGHTS_DIR"
   download_file "$SWIN_URL" "$SWIN_PATH"
-  download_file "$BERT_MODEL_URL" "$BERT_DIR/pytorch_model.bin"
-  download_file "$BERT_CONFIG_URL" "$BERT_DIR/config.json"
-  download_file "$BERT_VOCAB_URL" "$BERT_DIR/vocab.txt"
 
   python - <<'PY'
 import numpy
@@ -117,7 +112,7 @@ Conda env:
 
 Weights:
   Swin: $SWIN_PATH
-  BERT: $BERT_DIR
+  Text encoder: $TEXT_ENCODER_NAME
 
 PlantSeg root:
   $PLANTSEG_ROOT
@@ -125,11 +120,14 @@ PlantSeg root:
 Caption index for this setup:
   2
 
+Text length for this setup:
+  $MAX_TEXT_TOKENS
+
 Train command:
-  cd "$REPO_ROOT" && source "$CONDA_SH" && conda activate "$ENV_NAME" && python train.py --model lavt_one --dataset plantseg --model_id "$MODEL_ID" --batch-size 4 --lr 1e-5 --wd 1e-2 --swin_type base --window12 --img_size 480 --epochs 40 --workers 4 --pin_mem --device cuda:0 --plantseg_root "$PLANTSEG_ROOT" --plantseg_caption_index 2 --ck_bert "$BERT_DIR" --bert_tokenizer "$BERT_DIR" --pretrained_swin_weights "$SWIN_PATH"
+  cd "$REPO_ROOT" && source "$CONDA_SH" && conda activate "$ENV_NAME" && python train.py --model lavt_one --dataset plantseg --model_id "$MODEL_ID" --batch-size 4 --lr 1e-5 --wd 1e-2 --swin_type base --window12 --img_size 480 --epochs 40 --workers 4 --pin_mem --device cuda:0 --plantseg_root "$PLANTSEG_ROOT" --plantseg_caption_index 2 --text_encoder_name "$TEXT_ENCODER_NAME" --max_text_tokens "$MAX_TEXT_TOKENS" --pretrained_swin_weights "$SWIN_PATH"
 
 Test command:
-  cd "$REPO_ROOT" && source "$CONDA_SH" && conda activate "$ENV_NAME" && python test.py --model lavt_one --dataset plantseg --split test --swin_type base --window12 --img_size 480 --workers 4 --device cuda:0 --plantseg_root "$PLANTSEG_ROOT" --plantseg_caption_index 2 --ck_bert "$BERT_DIR" --bert_tokenizer "$BERT_DIR" --resume "$REPO_ROOT/checkpoints/model_best_${MODEL_ID}.pth" --save_mask_dir "$MASK_SAVE_DIR"
+  cd "$REPO_ROOT" && source "$CONDA_SH" && conda activate "$ENV_NAME" && python test.py --model lavt_one --dataset plantseg --split test --swin_type base --window12 --img_size 480 --workers 4 --device cuda:0 --plantseg_root "$PLANTSEG_ROOT" --plantseg_caption_index 2 --text_encoder_name "$TEXT_ENCODER_NAME" --max_text_tokens "$MAX_TEXT_TOKENS" --resume "$REPO_ROOT/checkpoints/model_best_${MODEL_ID}.pth" --save_mask_dir "$MASK_SAVE_DIR"
 
 EOF
 }

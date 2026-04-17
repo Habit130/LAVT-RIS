@@ -22,6 +22,7 @@ def _resolve_module_args(args):
     return {
         'align_module': align_module,
         'gate_module': gate_module,
+        'text_hidden_size': getattr(args, 'text_hidden_size', 768),
         'hapwam_hidden_dim': getattr(args, 'hapwam_hidden_dim', 128),
         'hapwam_dropout': getattr(args, 'hapwam_dropout', 0.1),
         'hlg_hidden_channels': getattr(args, 'hlg_hidden_channels', None),
@@ -73,6 +74,7 @@ def _segm_lavt(pretrained, args):
                                          fusion_drop=args.fusion_drop,
                                          align_module=module_args['align_module'],
                                          gate_module=module_args['gate_module'],
+                                         text_hidden_size=module_args['text_hidden_size'],
                                          hapwam_hidden_dim=module_args['hapwam_hidden_dim'],
                                          hapwam_dropout=module_args['hapwam_dropout'],
                                          hlg_hidden_channels=module_args['hlg_hidden_channels'],
@@ -149,6 +151,7 @@ def _segm_lavt_one(pretrained, args):
                                          fusion_drop=args.fusion_drop,
                                          align_module=module_args['align_module'],
                                          gate_module=module_args['gate_module'],
+                                         text_hidden_size=module_args['text_hidden_size'],
                                          hapwam_hidden_dim=module_args['hapwam_hidden_dim'],
                                          hapwam_dropout=module_args['hapwam_dropout'],
                                          hlg_hidden_channels=module_args['hlg_hidden_channels'],

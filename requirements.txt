@@ -4,11 +4,14 @@ tqdm
 timm
 mmcv-full==1.3.12
 mmsegmentation==0.17.0
+numpy<2
 ftfy
 regex
 scipy
 scikit-image
 pycocotools==2.0.2
 opencv-python==4.5.3.56
-tokenizers==0.8.1rc1
+tokenizers>=0.13,<0.20
+transformers>=4.41,<5.0
+sentencepiece>=0.1.99
 h5py

@@ -1,13 +1,23 @@
 import argparse
 
+from text_encoder import DEFAULT_MAX_TEXT_TOKENS, DEFAULT_TEXT_ENCODER_NAME
+
 
 def get_parser():
     parser = argparse.ArgumentParser(description='LAVT training and testing')
     parser.add_argument('--amsgrad', action='store_true',
                         help='if true, set amsgrad to True in an Adam or AdamW optimizer.')
     parser.add_argument('-b', '--batch-size', default=8, type=int)
-    parser.add_argument('--bert_tokenizer', default='bert-base-uncased', help='BERT tokenizer')
-    parser.add_argument('--ck_bert', default='bert-base-uncased', help='pre-trained BERT weights')
+    parser.add_argument('--text_tokenizer_name', default='',
+                        help='tokenizer name or local path; defaults to --text_encoder_name when omitted')
+    parser.add_argument('--text_encoder_name', default=DEFAULT_TEXT_ENCODER_NAME,
+                        help='pre-trained text encoder name or local path')
+    parser.add_argument('--max_text_tokens', default=DEFAULT_MAX_TEXT_TOKENS, type=int,
+                        help='maximum tokenized text length after truncation/padding')
+    parser.add_argument('--bert_tokenizer', default=None,
+                        help='deprecated alias of --text_tokenizer_name')
+    parser.add_argument('--ck_bert', default=None,
+                        help='deprecated alias of --text_encoder_name')
     parser.add_argument('--dataset', default='refcoco', help='refcoco, refcoco+, refcocog, or plantseg')
     parser.add_argument('--ddp_trained_weights', action='store_true',
                         help='Only needs specified when testing,'
@@ -70,6 +80,27 @@ def get_parser():
 
 
 def validate_args(args):
+    if args.ck_bert:
+        if args.text_encoder_name == DEFAULT_TEXT_ENCODER_NAME:
+            print('Deprecated argument --ck_bert detected; mapping it to --text_encoder_name.')
+            args.text_encoder_name = args.ck_bert
+        elif args.ck_bert != args.text_encoder_name:
+            print('Ignoring deprecated --ck_bert because --text_encoder_name is already set to [{}].'.format(
+                args.text_encoder_name))
+
+    if args.bert_tokenizer:
+        if not args.text_tokenizer_name:
+            print('Deprecated argument --bert_tokenizer detected; mapping it to --text_tokenizer_name.')
+            args.text_tokenizer_name = args.bert_tokenizer
+        elif args.bert_tokenizer != args.text_tokenizer_name:
+            print('Ignoring deprecated --bert_tokenizer because --text_tokenizer_name is already set to [{}].'.format(
+                args.text_tokenizer_name))
+
+    if not args.text_tokenizer_name:
+        args.text_tokenizer_name = args.text_encoder_name
+    if args.max_text_tokens < 1:
+        raise ValueError('--max_text_tokens must be >= 1')
+
     align_module = getattr(args, 'align_module', 'none')
     gate_module = getattr(args, 'gate_module', 'none')
     hlg_stages = tuple(getattr(args, 'hlg_stages', [3, 4]))

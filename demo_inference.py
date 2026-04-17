@@ -23,29 +23,13 @@ img = image_transforms(img).unsqueeze(0)  # (1, 3, 480, 480)
 img = img.to(device)  # for inference (input)
 
 # pre-process the raw sentence
-from bert.tokenization_bert import BertTokenizer
 import torch
-tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-sentence_tokenized = tokenizer.encode(text=sentence, add_special_tokens=True)
-sentence_tokenized = sentence_tokenized[:20]  # if the sentence is longer than 20, then this truncates it to 20 words
-# pad the tokenized sentence
-padded_sent_toks = [0] * 20
-padded_sent_toks[:len(sentence_tokenized)] = sentence_tokenized
-# create a sentence token mask: 1 for real words; 0 for padded tokens
-attention_mask = [0] * 20
-attention_mask[:len(sentence_tokenized)] = [1]*len(sentence_tokenized)
-# convert lists to tensors
-padded_sent_toks = torch.tensor(padded_sent_toks).unsqueeze(0)  # (1, 20)
-attention_mask = torch.tensor(attention_mask).unsqueeze(0)  # (1, 20)
-padded_sent_toks = padded_sent_toks.to(device)  # for inference (input)
-attention_mask = attention_mask.to(device)  # for inference (input)
 
-# initialize model and load weights
-from bert.modeling_bert import BertModel
 from lib import segmentation
+from text_encoder import (build_text_encoder, build_text_tokenizer, encode_text,
+                          get_checkpoint_text_encoder_state, prepare_text_encoder_args,
+                          tokenize_text)
 from utils import load_state_dict_with_fallback
-
-# construct a mini args class; like from a config file
 
 
 class args:
@@ -59,24 +43,36 @@ class args:
     hapwam_dropout = 0.1
     hlg_hidden_channels = None
     hlg_stages = [3, 4]
+    text_encoder_name = 'microsoft/deberta-v3-base'
+    text_tokenizer_name = ''
+    max_text_tokens = 64
 
+
+prepare_text_encoder_args(args)
+tokenizer = build_text_tokenizer(args)
+padded_sent_toks, attention_mask = tokenize_text(tokenizer, sentence, args.max_text_tokens)
+padded_sent_toks = padded_sent_toks.to(device)
+attention_mask = attention_mask.to(device)
 
 single_model = segmentation.__dict__['lavt'](pretrained='', args=args)
 single_model.to(device)
-model_class = BertModel
-single_bert_model = model_class.from_pretrained('bert-base-uncased')
-single_bert_model.pooler = None
+single_text_encoder = build_text_encoder(args)
 
 checkpoint = torch.load(weights, map_location='cpu')
-load_state_dict_with_fallback(single_bert_model, checkpoint['bert_model'], strict=True, description='bert_model')
+text_encoder_state, text_encoder_key = get_checkpoint_text_encoder_state(checkpoint, args)
+if text_encoder_state is not None:
+    load_state_dict_with_fallback(single_text_encoder,
+                                  text_encoder_state,
+                                  strict=True,
+                                  description=text_encoder_key)
 load_state_dict_with_fallback(single_model, checkpoint['model'], strict=True, description='model')
 model = single_model.to(device)
-bert_model = single_bert_model.to(device)
+text_encoder = single_text_encoder.to(device)
 
 
 # inference
 import torch.nn.functional as F
-last_hidden_states = bert_model(padded_sent_toks, attention_mask=attention_mask)[0]
+last_hidden_states = encode_text(text_encoder, padded_sent_toks, attention_mask)
 embedding = last_hidden_states.permute(0, 2, 1)
 output = model(img, embedding, l_mask=attention_mask.unsqueeze(-1))
 output = output.argmax(1, keepdim=True)  # (1, 1, 480, 480)
@@ -119,7 +115,3 @@ visualization = Image.fromarray(visualization)
 #visualization.show()
 # Save the visualization
 visualization.save('./demo/demo_result.jpg')
-
-
-
-

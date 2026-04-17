@@ -1,6 +1,6 @@
 # Linux 4090 运行说明
 
-本仓库的服务器交付面锁定为：
+本仓库当前锁定的服务器交付面为：
 
 - Linux
 - 单张 RTX 4090
@@ -8,8 +8,10 @@
 - Python 3.10
 - Miniconda
 - 数据目录为仓库同级的 `../plantseg`
-- 文本输入固定使用 `caption[3]`
+- 文本输入默认使用 `caption[3]`
 - 训练主模型固定为 `lavt_one`
+- 默认文本编码器为 `microsoft/deberta-v3-base`
+- 默认文本长度为 `64`
 
 ## 1. 环境
 
@@ -17,8 +19,8 @@
 
 ## 2. 外部资产
 
-- `bert-base-uncased`：沿用 Hugging Face 名称下载。
-- Swin 初始化权重：使用与原仓库 `swin_base_patch4_window12_384_22k.pth` 张量布局兼容的 Hugging Face 直链或本地文件。
+- DeBERTa-v3-base：训练和测试时通过 Hugging Face 名称 `microsoft/deberta-v3-base` 加载
+- Swin 初始化权重：使用与原仓库兼容的 `swin_base_patch4_window12_384_22k.pth`
 - `plantseg`：保持为仓库同级目录，结构固定为：
   - `../plantseg/main.json`
   - `../plantseg/images/`
@@ -26,7 +28,7 @@
 
 ## 3. 训练
 
-单卡训练命令面：
+单卡训练命令为：
 
 ```bash
 python train.py \
@@ -42,6 +44,8 @@ python train.py \
   --epochs 40 \
   --plantseg_root ../plantseg \
   --plantseg_caption_index 3 \
+  --text_encoder_name microsoft/deberta-v3-base \
+  --max_text_tokens 64 \
   --pretrained_swin_weights <hf-or-local-swin-weight>
 ```
 
@@ -54,7 +58,7 @@ python train.py \
 
 ## 4. 训练后验证
 
-正式测试命令面：
+正式测试命令为：
 
 ```bash
 python test.py \
@@ -67,6 +71,8 @@ python test.py \
   --workers 4 \
   --plantseg_root ../plantseg \
   --plantseg_caption_index 3 \
+  --text_encoder_name microsoft/deberta-v3-base \
+  --max_text_tokens 64 \
   --resume ./checkpoints/model_best_plantseg_lavt_one.pth
 ```
 
@@ -78,3 +84,10 @@ python test.py \
 - `mIoU`
 - `mACC`
 
+## 5. 严格对照设置
+
+如果需要做“只替换文本编码器，不改变旧长度策略”的严格对照，请显式指定：
+
+```bash
+--max_text_tokens 20
+```

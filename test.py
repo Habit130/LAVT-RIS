@@ -4,10 +4,10 @@ import torch
 import torch.utils.data
 from PIL import Image
 
-from bert.modeling_bert import BertModel
-
 from lib import segmentation
 import metrics
+from text_encoder import (build_text_encoder, encode_text, get_checkpoint_text_encoder_state,
+                          prepare_text_encoder_args)
 import transforms as T
 import utils
 import numpy as np
@@ -36,15 +36,15 @@ def get_dataset(image_set, transform, args):
     return ds, num_classes
 
 
-def forward_model(model, bert_model, image, sentences, attentions):
-    if bert_model is not None:
-        last_hidden_states = bert_model(sentences, attention_mask=attentions)[0]
+def forward_model(model, text_encoder, image, sentences, attentions):
+    if text_encoder is not None:
+        last_hidden_states = encode_text(text_encoder, sentences, attentions)
         embedding = last_hidden_states.permute(0, 2, 1)
         return model(image, embedding, l_mask=attentions.unsqueeze(-1))
     return model(image, sentences, l_mask=attentions)
 
 
-def evaluate(model, data_loader, bert_model, device, args):
+def evaluate(model, data_loader, text_encoder, device, args):
     model.eval()
     metric_logger = utils.MetricLogger(delimiter="  ")
 
@@ -62,7 +62,7 @@ def evaluate(model, data_loader, bert_model, device, args):
                 attentions = attentions.to(device).squeeze(1)
 
                 for j in range(sentences.size(-1)):
-                    output = forward_model(model, bert_model, image, sentences[:, :, j], attentions[:, :, j])
+                    output = forward_model(model, text_encoder, image, sentences[:, :, j], attentions[:, :, j])
                     meter.update_from_logits(output, target)
                     if save_root is not None:
                         save_prediction_mask(output, mask_paths[0], args, save_root)
@@ -86,7 +86,7 @@ def evaluate(model, data_loader, bert_model, device, args):
             attentions = attentions.squeeze(1)
             target = target.cpu().data.numpy()
             for j in range(sentences.size(-1)):
-                output = forward_model(model, bert_model, image, sentences[:, :, j], attentions[:, :, j])
+                output = forward_model(model, text_encoder, image, sentences[:, :, j], attentions[:, :, j])
                 output = output.cpu()
                 output_mask = output.argmax(1).data.numpy()
                 I, U = computeIoU(output_mask, target)
@@ -157,6 +157,7 @@ def save_prediction_mask(logits, mask_relative_path, args, save_root):
 
 def main(args):
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
+    text_encoder_config = prepare_text_encoder_args(args)
     dataset_test, _ = get_dataset(args.split, get_transform(args=args), args)
     test_sampler = torch.utils.data.SequentialSampler(dataset_test)
     data_loader_test = torch.utils.data.DataLoader(dataset_test, batch_size=1,
@@ -171,20 +172,18 @@ def main(args):
     model = single_model.to(device)
 
     if args.model != 'lavt_one':
-        model_class = BertModel
-        single_bert_model = model_class.from_pretrained(args.ck_bert)
-        # work-around for a transformers bug; need to update to a newer version of transformers to remove these two lines
-        if args.ddp_trained_weights:
-            single_bert_model.pooler = None
-        utils.load_state_dict_with_fallback(single_bert_model,
-                                            checkpoint['bert_model'],
-                                            strict=True,
-                                            description='bert_model')
-        bert_model = single_bert_model.to(device)
+        single_text_encoder = build_text_encoder(args, config=text_encoder_config)
+        text_encoder_state, text_encoder_key = get_checkpoint_text_encoder_state(checkpoint, args)
+        if text_encoder_state is not None:
+            utils.load_state_dict_with_fallback(single_text_encoder,
+                                                text_encoder_state,
+                                                strict=True,
+                                                description=text_encoder_key)
+        text_encoder = single_text_encoder.to(device)
     else:
-        bert_model = None
+        text_encoder = None
 
-    evaluate(model, data_loader_test, bert_model, device=device, args=args)
+    evaluate(model, data_loader_test, text_encoder, device=device, args=args)
 
 
 if __name__ == "__main__":

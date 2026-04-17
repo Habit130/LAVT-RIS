@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import torch.utils.data as data
 from PIL import Image
 
-from bert.tokenization_bert import BertTokenizer
+from text_encoder import build_text_tokenizer, tokenize_text
 
 
 class PlantSegDataset(data.Dataset):
@@ -22,7 +22,7 @@ class PlantSegDataset(data.Dataset):
         self.target_transform = target_transforms
         self.split = split
         self.eval_mode = eval_mode
-        self.max_tokens = 20
+        self.max_tokens = args.max_text_tokens
         self.caption_index = args.plantseg_caption_index
         self.root = Path(args.plantseg_root).expanduser().resolve()
         self.metadata_path = self.root / 'main.json'
@@ -34,7 +34,7 @@ class PlantSegDataset(data.Dataset):
         if not self.samples:
             raise ValueError('No plantseg samples found for split [{}] under {}'.format(split, self.metadata_path))
 
-        self.tokenizer = BertTokenizer.from_pretrained(args.bert_tokenizer)
+        self.tokenizer = build_text_tokenizer(args)
         self.input_ids = []
         self.attention_masks = []
 
@@ -47,17 +47,10 @@ class PlantSegDataset(data.Dataset):
                 )
 
             sentence_raw = captions[self.caption_index]
-            attention_mask = [0] * self.max_tokens
-            padded_input_ids = [0] * self.max_tokens
+            input_ids, attention_mask = tokenize_text(self.tokenizer, sentence_raw, self.max_tokens)
 
-            input_ids = self.tokenizer.encode(text=sentence_raw, add_special_tokens=True)
-            input_ids = input_ids[:self.max_tokens]
-
-            padded_input_ids[:len(input_ids)] = input_ids
-            attention_mask[:len(input_ids)] = [1] * len(input_ids)
-
-            self.input_ids.append(torch.tensor(padded_input_ids).unsqueeze(0))
-            self.attention_masks.append(torch.tensor(attention_mask).unsqueeze(0))
+            self.input_ids.append(input_ids)
+            self.attention_masks.append(attention_mask)
 
     @staticmethod
     def _mask_to_tensor(mask):

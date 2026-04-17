@@ -25,5 +25,7 @@ dependencies:
       - pycocotools>=2.0.7
       - opencv-python-headless>=4.8
       - tokenizers>=0.13,<0.20
+      - transformers>=4.41,<5.0
+      - sentencepiece>=0.1.99
       - h5py
 

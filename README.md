@@ -10,11 +10,10 @@ Code in this repository is written using [PyTorch](https://pytorch.org/) and is 
 * Inside `./lib`, `_utils.py` defines the highest-level model, which incorporates the backbone network
 defined in `backbone.py` and the simple mask decoder defined in `mask_predictor.py`.
 `segmentation.py` provides the model interface and initialization functions.
-* `./bert` contains files migrated from [Hugging Face Transformers v3.0.2](https://huggingface.co/transformers/v3.0.2/quicktour.html),
-which implement the BERT language model.
-We used Transformers v3.0.2 during development but it had a bug that would appear when using `DistributedDataParallel`.
-Therefore we maintain a copy of the relevant source files in this repository.
-This way, the bug is fixed and code in this repository is self-contained.
+* `./text_encoder.py` provides the unified text-encoder interface used by training, testing, datasets and demo scripts.
+The current default text encoder is `microsoft/deberta-v3-base`, loaded through the official Hugging Face
+`transformers` package. The legacy `./bert` directory is kept in the repository for reference only and is no longer
+used by the main training or evaluation paths.
 * `./train.py` is invoked to train the model.
 * `./test.py` is invoked to run inference on the evaluation subsets after training.
 * `./refer` contains data pre-processing code and is also where data should be placed, including the images and all annotations.
@@ -25,6 +24,11 @@ functions for `DistributedDataParallel`.
 
 
 ## Updates
+**April 17<sup>th</sup>, 2026**. The default text encoder is now `microsoft/deberta-v3-base`.
+* Training, testing, dataset preprocessing and the demo script all use a unified Hugging Face text-encoder interface.
+* The default maximum text length is now `64` tokens.
+* To reproduce the old strict BERT-style length setting for ablations, pass `--max_text_tokens 20`.
+
 **April 13<sup>th</sup>, 2023**. Using the Dice loss instead of the cross-entropy loss can improve results. Will add code and release weights later when get a chance.
 
 **June 21<sup>st</sup>, 2022**. Uploaded the training logs and trained
@@ -66,6 +70,9 @@ conda install pytorch==1.7.1 torchvision==0.8.2 torchaudio==0.7.2 cudatoolkit=10
 pip install -r requirements.txt
 ```
 
+The default text encoder is resolved from Hugging Face, so make sure the machine can access the Hub or that the model
+has already been cached locally. The current default is `microsoft/deberta-v3-base`.
+
 ### Datasets
 1. Follow instructions in the `./refer` directory to set up subdirectories
 and download annotations.
@@ -92,6 +99,8 @@ These weights are needed for training to initialize the model.
 mkdir ./checkpoints
 ```
 2. Download LAVT model weights (which are stored on Google Drive) using links below and put them in `./checkpoints`.
+These released checkpoints are legacy BERT-based checkpoints. If you want to evaluate them with the current codebase,
+explicitly set `--text_encoder_name bert-base-uncased --text_tokenizer_name bert-base-uncased --max_text_tokens 20`.
 
 | [RefCOCO](https://drive.google.com/file/d/13D-OeEOijV8KTC3BkFP-gOJymc6DLwVT/view?usp=sharing) | [RefCOCO+](https://drive.google.com/file/d/1B8Q44ZWsc8Pva2xD_M-KFh7-LgzeH2-2/view?usp=sharing) | [G-Ref (UMD)](https://drive.google.com/file/d/1BjUnPVpALurkGl7RXXvQiAHhA-gQYKvK/view?usp=sharing) | [G-Ref (Google)](https://drive.google.com/file/d/1weiw5UjbPfo3tCBPfB8tu6xFXCUG16yS/view?usp=sharing) |
 |---|---|---|---|
@@ -131,6 +140,11 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.launch --nproc_per_node
 mkdir ./models/gref_google
 CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.launch --nproc_per_node 4 --master_port 12345 train.py --model lavt --dataset refcocog --splitBy google --model_id gref_google --batch-size 8 --lr 0.00005 --wd 1e-2 --swin_type base --pretrained_swin_weights ./pretrained_weights/swin_base_patch4_window12_384_22k.pth --epochs 40 --img_size 480 2>&1 | tee ./models/gref_google/output
 ```
+All commands above use the new defaults `--text_encoder_name microsoft/deberta-v3-base` and `--max_text_tokens 64`.
+If you want that to be explicit in the command line, append:
+```shell
+--text_encoder_name microsoft/deberta-v3-base --max_text_tokens 64
+```
 * *--model* is a pre-defined model name. Options include `lavt` and `lavt_one`. See [Updates](#updates).
 * *--dataset* is the dataset name. One can choose from `refcoco`, `refcoco+`, and `refcocog`.
 * *--splitBy* needs to be specified if and only if the dataset is G-Ref (which is also called RefCOCOg).
@@ -147,16 +161,16 @@ This is a nuisance and should be resolved in the future, *i.e.*, using a proper 
 ## Testing
 For RefCOCO/RefCOCO+, run one of
 ```shell
-python test.py --model lavt --swin_type base --dataset refcoco --split val --resume ./checkpoints/refcoco.pth --workers 4 --ddp_trained_weights --window12 --img_size 480
-python test.py --model lavt --swin_type base --dataset refcoco+ --split val --resume ./checkpoints/refcoco+.pth --workers 4 --ddp_trained_weights --window12 --img_size 480
+python test.py --model lavt --swin_type base --dataset refcoco --split val --resume ./checkpoints/refcoco.pth --workers 4 --ddp_trained_weights --window12 --img_size 480 --text_encoder_name bert-base-uncased --text_tokenizer_name bert-base-uncased --max_text_tokens 20
+python test.py --model lavt --swin_type base --dataset refcoco+ --split val --resume ./checkpoints/refcoco+.pth --workers 4 --ddp_trained_weights --window12 --img_size 480 --text_encoder_name bert-base-uncased --text_tokenizer_name bert-base-uncased --max_text_tokens 20
 ```
 * *--split* is the subset to evaluate, and one can choose from `val`, `testA`, and `testB`.
 * *--resume* is the path to the weights of a trained model.
 
 For G-Ref (UMD)/G-Ref (Google), run one of
 ```shell
-python test.py --model lavt --swin_type base --dataset refcocog --splitBy umd --split val --resume ./checkpoints/gref_umd.pth --workers 4 --ddp_trained_weights --window12 --img_size 480
-python test.py --model lavt --swin_type base --dataset refcocog --splitBy google --split val --resume ./checkpoints/gref_google.pth --workers 4 --ddp_trained_weights --window12 --img_size 480
+python test.py --model lavt --swin_type base --dataset refcocog --splitBy umd --split val --resume ./checkpoints/gref_umd.pth --workers 4 --ddp_trained_weights --window12 --img_size 480 --text_encoder_name bert-base-uncased --text_tokenizer_name bert-base-uncased --max_text_tokens 20
+python test.py --model lavt --swin_type base --dataset refcocog --splitBy google --split val --resume ./checkpoints/gref_google.pth --workers 4 --ddp_trained_weights --window12 --img_size 480 --text_encoder_name bert-base-uncased --text_tokenizer_name bert-base-uncased --max_text_tokens 20
 ```
 * *--splitBy* specifies the partition to evaluate.
 One can choose from `umd` or `google`.
@@ -226,8 +240,7 @@ Specifically,
 * data pre-processing leverages the [refer](https://github.com/lichengunc/refer) repository,
 * the backbone model is implemented based on code from [Swin Transformer for Semantic Segmentation](https://github.com/SwinTransformer/Swin-Transformer-Semantic-Segmentation),
 * the training and testing pipelines are adapted from [RefVOS](https://github.com/miriambellver/refvos),
-* and implementation of the BERT model (files in the bert directory) is from [Hugging Face Transformers v3.0.2](https://github.com/huggingface/transformers/tree/v3.0.2)
-(we migrated over the relevant code to fix a bug and simplify the installation process).
+* and the current text-encoder integration is based on the official [Hugging Face Transformers](https://github.com/huggingface/transformers) library.
 
 Some of these repositories in turn adapt code from [OpenMMLab](https://github.com/open-mmlab) and [TorchVision](https://github.com/pytorch/vision).
 We'd like to thank the authors/organizations of these repositories for open sourcing their projects.

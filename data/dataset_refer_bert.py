@@ -9,12 +9,11 @@ from PIL import Image
 import torchvision.transforms.functional as TF
 import random
 
-from bert.tokenization_bert import BertTokenizer
-
 import h5py
 from refer.refer import REFER
 
 from args import get_parser
+from text_encoder import build_text_tokenizer, tokenize_text
 
 # Dataset configuration initialization
 parser = get_parser()
@@ -36,7 +35,7 @@ class ReferDataset(data.Dataset):
         self.split = split
         self.refer = REFER(args.refer_data_root, args.dataset, args.splitBy)
 
-        self.max_tokens = 20
+        self.max_tokens = args.max_text_tokens
 
         ref_ids = self.refer.getRefIds(split=self.split)
         img_ids = self.refer.getImgIds(ref_ids)
@@ -47,7 +46,7 @@ class ReferDataset(data.Dataset):
 
         self.input_ids = []
         self.attention_masks = []
-        self.tokenizer = BertTokenizer.from_pretrained(args.bert_tokenizer)
+        self.tokenizer = build_text_tokenizer(args)
 
         self.eval_mode = eval_mode
         # if we are testing on a dataset, test all sentences of an object;
@@ -60,19 +59,9 @@ class ReferDataset(data.Dataset):
 
             for i, (el, sent_id) in enumerate(zip(ref['sentences'], ref['sent_ids'])):
                 sentence_raw = el['raw']
-                attention_mask = [0] * self.max_tokens
-                padded_input_ids = [0] * self.max_tokens
-
-                input_ids = self.tokenizer.encode(text=sentence_raw, add_special_tokens=True)
-
-                # truncation of tokens
-                input_ids = input_ids[:self.max_tokens]
-
-                padded_input_ids[:len(input_ids)] = input_ids
-                attention_mask[:len(input_ids)] = [1]*len(input_ids)
-
-                sentences_for_ref.append(torch.tensor(padded_input_ids).unsqueeze(0))
-                attentions_for_ref.append(torch.tensor(attention_mask).unsqueeze(0))
+                input_ids, attention_mask = tokenize_text(self.tokenizer, sentence_raw, self.max_tokens)
+                sentences_for_ref.append(input_ids)
+                attentions_for_ref.append(attention_mask)
 
             self.input_ids.append(sentences_for_ref)
             self.attention_masks.append(attentions_for_ref)

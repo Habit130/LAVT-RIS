@@ -31,7 +31,7 @@ class Mlp(nn.Module):
 
 
 class TokenRoutingHead(nn.Module):
-    def __init__(self, in_dim=768, hidden_dim=128, dropout=0.1):
+    def __init__(self, in_dim, hidden_dim=128, dropout=0.1):
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
@@ -412,6 +412,7 @@ class MultiModalSwinTransformer(nn.Module):
                  fusion_drop=0.0,
                  align_module='none',
                  gate_module='none',
+                 text_hidden_size=768,
                  hapwam_hidden_dim=128,
                  hapwam_dropout=0.1,
                  hlg_hidden_channels=None,
@@ -435,6 +436,7 @@ class MultiModalSwinTransformer(nn.Module):
         self.frozen_stages = frozen_stages
         self.align_module = align_module
         self.gate_module = gate_module
+        self.text_hidden_size = text_hidden_size
         self.hlg_stage_ids = set(hlg_stages or [])
 
         # split image into non-overlapping patches
@@ -457,7 +459,8 @@ class MultiModalSwinTransformer(nn.Module):
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]  # stochastic depth decay rule
 
         if self.align_module == 'hapwam':
-            self.token_routing_head = TokenRoutingHead(hidden_dim=hapwam_hidden_dim,
+            self.token_routing_head = TokenRoutingHead(in_dim=text_hidden_size,
+                                                       hidden_dim=hapwam_hidden_dim,
                                                        dropout=hapwam_dropout)
 
         # build layers
@@ -481,6 +484,7 @@ class MultiModalSwinTransformer(nn.Module):
                 fusion_drop=fusion_drop,
                 align_module=align_module,
                 gate_module=gate_module,
+                text_hidden_size=text_hidden_size,
                 stage_id=i_layer + 1,
                 hlg_hidden_channels=hlg_hidden_channels,
                 hlg_stages=self.hlg_stage_ids
@@ -616,6 +620,7 @@ class MMBasicLayer(nn.Module):
                  fusion_drop=0.0,
                  align_module='none',
                  gate_module='none',
+                 text_hidden_size=768,
                  stage_id=1,
                  hlg_hidden_channels=None,
                  hlg_stages=(3, 4)
@@ -648,11 +653,11 @@ class MMBasicLayer(nn.Module):
             for i in range(depth)])
 
         if align_module == 'plain':
-            self.fusion = PlainTextFusion(dim, 768, dropout=fusion_drop)
+            self.fusion = PlainTextFusion(dim, text_hidden_size, dropout=fusion_drop)
         elif align_module == 'pwam':
-            self.fusion = PWAM(dim, dim, 768, dim, dim, num_heads=num_heads_fusion, dropout=fusion_drop)
+            self.fusion = PWAM(dim, dim, text_hidden_size, dim, dim, num_heads=num_heads_fusion, dropout=fusion_drop)
         elif align_module == 'hapwam':
-            self.fusion = HAPWAM(dim, dim, 768, dim, dim, num_heads=num_heads_fusion, dropout=fusion_drop)
+            self.fusion = HAPWAM(dim, dim, text_hidden_size, dim, dim, num_heads=num_heads_fusion, dropout=fusion_drop)
         else:
             self.fusion = None
 

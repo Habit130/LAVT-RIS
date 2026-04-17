@@ -4,6 +4,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from text_encoder import build_text_encoder, encode_text
+
 
 class _LAVTSimpleDecode(nn.Module):
     def __init__(self, backbone, classifier):
@@ -39,15 +41,13 @@ class _LAVTOneSimpleDecode(nn.Module):
         super(_LAVTOneSimpleDecode, self).__init__()
         self.backbone = backbone
         self.classifier = classifier
-        from bert.modeling_bert import BertModel
-        self.text_encoder = BertModel.from_pretrained(args.ck_bert)
-        self.text_encoder.pooler = None
+        self.text_encoder = build_text_encoder(args)
 
     def forward(self, x, text, l_mask, return_aux=False):
         input_shape = x.shape[-2:]
         ### language inference ###
-        l_feats = self.text_encoder(text, attention_mask=l_mask)[0]  # (6, 10, 768)
-        l_feats = l_feats.permute(0, 2, 1)  # (B, 768, N_l) to make Conv1d happy
+        l_feats = encode_text(self.text_encoder, text, l_mask)
+        l_feats = l_feats.permute(0, 2, 1)  # (B, H, N_l) to make Conv1d happy
         l_mask = l_mask.unsqueeze(dim=-1)  # (batch, N_l, 1)
         ##########################
         if return_aux:

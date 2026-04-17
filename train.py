@@ -11,10 +11,12 @@ import torch.nn.functional as F
 import torch.utils.data
 from torch import nn
 
-from bert.modeling_bert import BertModel
 from lib import segmentation
 
 import metrics
+from text_encoder import (TEXT_ENCODER_MODEL_KEY, build_text_encoder, encode_text,
+                          get_checkpoint_text_encoder_state, get_text_encoder_layers,
+                          prepare_text_encoder_args)
 import transforms as T
 import utils
 
@@ -139,16 +141,16 @@ def allow_partial_checkpoint_load(args):
     return getattr(args, 'align_module', 'none') in ('plain', 'hapwam') or getattr(args, 'gate_module', 'none') == 'hlg'
 
 
-def forward_model(model, bert_model, image, sentences, attentions, return_aux=False):
-    if bert_model is not None:
-        last_hidden_states = bert_model(sentences, attention_mask=attentions)[0]
+def forward_model(model, text_encoder, image, sentences, attentions, return_aux=False):
+    if text_encoder is not None:
+        last_hidden_states = encode_text(text_encoder, sentences, attentions)
         embedding = last_hidden_states.permute(0, 2, 1)
         output = model(image, embedding, l_mask=attentions.unsqueeze(dim=-1), return_aux=return_aux)
         return output
     return model(image, sentences, l_mask=attentions, return_aux=return_aux)
 
 
-def evaluate(model, data_loader, bert_model, device, args):
+def evaluate(model, data_loader, text_encoder, device, args):
     model.eval()
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Val:'
@@ -163,7 +165,7 @@ def evaluate(model, data_loader, bert_model, device, args):
                 sentences = sentences.to(device, non_blocking=device.type == 'cuda').squeeze(1)
                 attentions = attentions.to(device, non_blocking=device.type == 'cuda').squeeze(1)
 
-                output = forward_model(model, bert_model, image, sentences, attentions)
+                output = forward_model(model, text_encoder, image, sentences, attentions)
                 meter.update_from_logits(output, target)
 
         result = meter.compute()
@@ -188,7 +190,7 @@ def evaluate(model, data_loader, bert_model, device, args):
             sentences = sentences.to(device, non_blocking=device.type == 'cuda').squeeze(1)
             attentions = attentions.to(device, non_blocking=device.type == 'cuda').squeeze(1)
 
-            output = forward_model(model, bert_model, image, sentences, attentions)
+            output = forward_model(model, text_encoder, image, sentences, attentions)
 
             this_iou, intersection, union = iou(output, target)
             acc_ious += this_iou
@@ -215,10 +217,10 @@ def evaluate(model, data_loader, bert_model, device, args):
 
 
 def train_one_epoch(model, criterion_fn, optimizer, data_loader, lr_scheduler, epoch, print_freq,
-                    iterations, bert_model, device, args):
+                    iterations, text_encoder, device, args):
     model.train()
-    if bert_model is not None:
-        bert_model.train()
+    if text_encoder is not None:
+        text_encoder.train()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value}'))
@@ -235,9 +237,9 @@ def train_one_epoch(model, criterion_fn, optimizer, data_loader, lr_scheduler, e
             has_false_healthy = has_false_healthy.to(device, non_blocking=device.type == 'cuda')
 
         if should_return_aux(args):
-            output, aux_outputs = forward_model(model, bert_model, image, sentences, attentions, return_aux=True)
+            output, aux_outputs = forward_model(model, text_encoder, image, sentences, attentions, return_aux=True)
         else:
-            output = forward_model(model, bert_model, image, sentences, attentions)
+            output = forward_model(model, text_encoder, image, sentences, attentions)
             aux_outputs = {}
         seg_loss = criterion_fn(output, target)
         gate_losses = compute_gate_losses(aux_outputs, target, false_healthy_mask, has_false_healthy,
@@ -272,6 +274,7 @@ def train_one_epoch(model, criterion_fn, optimizer, data_loader, lr_scheduler, e
 
 def main(args):
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
+    text_encoder_config = prepare_text_encoder_args(args)
 
     dataset, _ = get_dataset("train", get_transform(args=args), args=args)
     dataset_val, _ = get_dataset("val", get_transform(args=args), args=args)
@@ -303,16 +306,15 @@ def main(args):
     single_model = model.module if args.distributed else model
 
     if args.model != 'lavt_one':
-        bert_model = BertModel.from_pretrained(args.ck_bert)
-        bert_model.pooler = None
-        bert_model = bert_model.to(device)
+        text_encoder = build_text_encoder(args, config=text_encoder_config)
+        text_encoder = text_encoder.to(device)
         if args.distributed:
-            bert_model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(bert_model)
-            bert_model = torch.nn.parallel.DistributedDataParallel(bert_model, device_ids=[args.local_rank])
-        single_bert_model = bert_model.module if args.distributed else bert_model
+            text_encoder = torch.nn.SyncBatchNorm.convert_sync_batchnorm(text_encoder)
+            text_encoder = torch.nn.parallel.DistributedDataParallel(text_encoder, device_ids=[args.local_rank])
+        single_text_encoder = text_encoder.module if args.distributed else text_encoder
     else:
-        bert_model = None
-        single_bert_model = None
+        text_encoder = None
+        single_text_encoder = None
 
     if args.resume:
         checkpoint = torch.load(args.resume, map_location='cpu')
@@ -320,11 +322,17 @@ def main(args):
                                             checkpoint['model'],
                                             strict=not allow_partial_checkpoint_load(args),
                                             description='model')
-        if args.model != 'lavt_one':
-            utils.load_state_dict_with_fallback(single_bert_model,
-                                                checkpoint['bert_model'],
+        text_encoder_state, text_encoder_key = get_checkpoint_text_encoder_state(checkpoint, args)
+        if args.model != 'lavt_one' and text_encoder_state is not None:
+            utils.load_state_dict_with_fallback(single_text_encoder,
+                                                text_encoder_state,
                                                 strict=True,
-                                                description='bert_model')
+                                                description=text_encoder_key)
+        elif args.model == 'lavt_one' and text_encoder_state is not None:
+            utils.load_state_dict_with_fallback(single_model.text_encoder,
+                                                text_encoder_state,
+                                                strict=True,
+                                                description=text_encoder_key)
 
     backbone_no_decay = []
     backbone_decay = []
@@ -335,22 +343,26 @@ def main(args):
             backbone_decay.append(parameter)
 
     if args.model != 'lavt_one':
+        text_encoder_layers = get_text_encoder_layers(single_text_encoder)
+        num_trainable_text_layers = min(10, len(text_encoder_layers))
         params_to_optimize = [
             {'params': backbone_no_decay, 'weight_decay': 0.0},
             {'params': backbone_decay},
             {"params": [p for p in single_model.classifier.parameters() if p.requires_grad]},
             {"params": reduce(operator.concat,
-                              [[p for p in single_bert_model.encoder.layer[i].parameters()
-                                if p.requires_grad] for i in range(10)])},
+                              [[p for p in text_encoder_layers[i].parameters()
+                                if p.requires_grad] for i in range(num_trainable_text_layers)])},
         ]
     else:
+        text_encoder_layers = get_text_encoder_layers(single_model.text_encoder)
+        num_trainable_text_layers = min(10, len(text_encoder_layers))
         params_to_optimize = [
             {'params': backbone_no_decay, 'weight_decay': 0.0},
             {'params': backbone_decay},
             {"params": [p for p in single_model.classifier.parameters() if p.requires_grad]},
             {"params": reduce(operator.concat,
-                              [[p for p in single_model.text_encoder.encoder.layer[i].parameters()
-                                if p.requires_grad] for i in range(10)])},
+                              [[p for p in text_encoder_layers[i].parameters()
+                                if p.requires_grad] for i in range(num_trainable_text_layers)])},
         ]
 
     optimizer = torch.optim.AdamW(params_to_optimize,
@@ -376,8 +388,8 @@ def main(args):
             data_loader.sampler.set_epoch(epoch)
 
         train_one_epoch(model, criterion, optimizer, data_loader, lr_scheduler, epoch,
-                        args.print_freq, iterations, bert_model, device, args)
-        validation_result = evaluate(model, data_loader_val, bert_model, device, args)
+                        args.print_freq, iterations, text_encoder, device, args)
+        validation_result = evaluate(model, data_loader_val, text_encoder, device, args)
 
         if args.dataset == 'plantseg':
             print('Foreground IoU {}'.format(validation_result['fg_iou'] * 100.0))
@@ -391,10 +403,10 @@ def main(args):
 
         if best_score < current_score:
             print('Better epoch: {}\n'.format(epoch))
-            if single_bert_model is not None:
+            if args.model != 'lavt_one':
                 dict_to_save = {
                     'model': single_model.state_dict(),
-                    'bert_model': single_bert_model.state_dict(),
+                    TEXT_ENCODER_MODEL_KEY: single_text_encoder.state_dict(),
                     'optimizer': optimizer.state_dict(),
                     'epoch': epoch,
                     'args': args,
@@ -403,6 +415,7 @@ def main(args):
             else:
                 dict_to_save = {
                     'model': single_model.state_dict(),
+                    TEXT_ENCODER_MODEL_KEY: single_model.text_encoder.state_dict(),
                     'optimizer': optimizer.state_dict(),
                     'epoch': epoch,
                     'args': args,
