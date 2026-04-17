@@ -376,12 +376,17 @@ def main(args):
     iterations = 0
     best_score = -1.0
 
+    resume_epoch = -999
     if args.resume:
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-        resume_epoch = checkpoint['epoch']
-    else:
-        resume_epoch = -999
+        try:
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+            resume_epoch = checkpoint['epoch']
+        except (ValueError, RuntimeError) as exc:
+            if allow_partial_checkpoint_load(args):
+                print('Skipping optimizer/lr_scheduler resume because checkpoint is partially compatible: {}'.format(exc))
+            else:
+                raise
 
     for epoch in range(max(0, resume_epoch + 1), args.epochs):
         if args.distributed:

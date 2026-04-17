@@ -39,7 +39,8 @@ class args:
     fusion_drop = 0.0
     align_module = 'pwam'
     gate_module = 'lg'
-    hapwam_hidden_dim = 128
+    hapwam_hidden_dim = 256
+    hapwam_fusion_hidden_dim = 256
     hapwam_dropout = 0.1
     hlg_hidden_channels = None
     hlg_stages = [3, 4]

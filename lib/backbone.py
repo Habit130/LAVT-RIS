@@ -30,18 +30,33 @@ class Mlp(nn.Module):
         return x
 
 
-class TokenRoutingHead(nn.Module):
-    def __init__(self, in_dim, hidden_dim=128, dropout=0.1):
+class ConditionedTokenRouter(nn.Module):
+    def __init__(self, text_dim, visual_dim, hidden_dim=256):
+        super().__init__()
+        self.text_proj = nn.Linear(text_dim, hidden_dim)
+        self.visual_proj = nn.Linear(visual_dim, hidden_dim)
+        self.fusion = nn.GELU()
+        self.out_proj = nn.Linear(hidden_dim, 3)
+
+    def forward(self, text_tokens, visual_summary):
+        conditioned = self.text_proj(text_tokens) + self.visual_proj(visual_summary).unsqueeze(1)
+        logits = self.out_proj(self.fusion(conditioned))
+        return F.softmax(logits, dim=-1)
+
+
+class AdaptiveGroupFusion(nn.Module):
+    def __init__(self, text_dim, visual_dim, hidden_dim=256, dropout=0.1):
         super().__init__()
         self.mlp = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
+            nn.Linear(text_dim + visual_dim, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, 3)
         )
 
-    def forward(self, x):
-        return self.mlp(x)
+    def forward(self, text_summary, visual_summary):
+        fusion_input = torch.cat([text_summary, visual_summary], dim=-1)
+        return F.softmax(self.mlp(fusion_input), dim=-1)
 
 
 def window_partition(x, window_size):
@@ -413,7 +428,8 @@ class MultiModalSwinTransformer(nn.Module):
                  align_module='none',
                  gate_module='none',
                  text_hidden_size=768,
-                 hapwam_hidden_dim=128,
+                 hapwam_hidden_dim=256,
+                 hapwam_fusion_hidden_dim=256,
                  hapwam_dropout=0.1,
                  hlg_hidden_channels=None,
                  hlg_stages=(3, 4)
@@ -458,11 +474,6 @@ class MultiModalSwinTransformer(nn.Module):
         # stochastic depth
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]  # stochastic depth decay rule
 
-        if self.align_module == 'hapwam':
-            self.token_routing_head = TokenRoutingHead(in_dim=text_hidden_size,
-                                                       hidden_dim=hapwam_hidden_dim,
-                                                       dropout=hapwam_dropout)
-
         # build layers
         self.layers = nn.ModuleList()
         for i_layer in range(self.num_layers):
@@ -486,6 +497,8 @@ class MultiModalSwinTransformer(nn.Module):
                 gate_module=gate_module,
                 text_hidden_size=text_hidden_size,
                 stage_id=i_layer + 1,
+                hapwam_hidden_dim=hapwam_hidden_dim,
+                hapwam_fusion_hidden_dim=hapwam_fusion_hidden_dim,
                 hlg_hidden_channels=hlg_hidden_channels,
                 hlg_stages=self.hlg_stage_ids
             )
@@ -545,22 +558,6 @@ class MultiModalSwinTransformer(nn.Module):
         else:
             raise TypeError('pretrained must be a str or None')
 
-    def _route_language(self, l, l_mask):
-        l_tokens = l.permute(0, 2, 1).contiguous()
-        routing_logits = self.token_routing_head(l_tokens)
-        if routing_logits.dim() != 3 or routing_logits.size(-1) != 3:
-            raise RuntimeError('HAPWAM routing logits must have shape [B, T, 3], got {}'.format(
-                tuple(routing_logits.shape)))
-        routing_weights = F.softmax(routing_logits, dim=-1)
-        token_mask = l_mask.to(dtype=l_tokens.dtype)
-
-        routed_languages = []
-        for group_idx in range(3):
-            routed_tokens = l_tokens * routing_weights[..., group_idx:group_idx + 1] * token_mask
-            routed_languages.append(routed_tokens.permute(0, 2, 1).contiguous())
-
-        return tuple(routed_languages)
-
     def forward(self, x, l, l_mask, return_aux=False):
         """Forward function."""
         x = self.patch_embed(x)
@@ -574,13 +571,11 @@ class MultiModalSwinTransformer(nn.Module):
             x = x.flatten(2).transpose(1, 2)
         x = self.pos_drop(x)
 
-        routed_language = self._route_language(l, l_mask) if self.align_module == 'hapwam' else l
-
         outs = []
         aux = {}
         for i in range(self.num_layers):
             layer = self.layers[i]
-            x_out, H, W, x, Wh, Ww, layer_aux = layer(x, Wh, Ww, routed_language, l_mask)
+            x_out, H, W, x, Wh, Ww, layer_aux = layer(x, Wh, Ww, l, l_mask)
 
             if i in self.out_indices:
                 norm_layer = getattr(self, f'norm{i}')
@@ -622,6 +617,8 @@ class MMBasicLayer(nn.Module):
                  gate_module='none',
                  text_hidden_size=768,
                  stage_id=1,
+                 hapwam_hidden_dim=256,
+                 hapwam_fusion_hidden_dim=256,
                  hlg_hidden_channels=None,
                  hlg_stages=(3, 4)
                  ):
@@ -657,7 +654,11 @@ class MMBasicLayer(nn.Module):
         elif align_module == 'pwam':
             self.fusion = PWAM(dim, dim, text_hidden_size, dim, dim, num_heads=num_heads_fusion, dropout=fusion_drop)
         elif align_module == 'hapwam':
-            self.fusion = HAPWAM(dim, dim, text_hidden_size, dim, dim, num_heads=num_heads_fusion, dropout=fusion_drop)
+            self.fusion = HAPWAM(dim, dim, text_hidden_size, dim, dim,
+                                 num_heads=num_heads_fusion,
+                                 router_hidden_dim=hapwam_hidden_dim,
+                                 fusion_hidden_dim=hapwam_fusion_hidden_dim,
+                                 dropout=fusion_drop)
         else:
             self.fusion = None
 
@@ -786,23 +787,51 @@ class PWAM(nn.Module):
 
 
 class HAPWAM(nn.Module):
-    def __init__(self, dim, v_in_channels, l_in_channels, key_channels, value_channels, num_heads=0, dropout=0.0):
+    def __init__(self, dim, v_in_channels, l_in_channels, key_channels, value_channels,
+                 num_heads=0, router_hidden_dim=256, fusion_hidden_dim=256, dropout=0.0):
         super(HAPWAM, self).__init__()
         self.shared_pwam = PWAM(dim, v_in_channels, l_in_channels, key_channels, value_channels,
                                 num_heads=num_heads, dropout=dropout)
-        self.stage_group_logits = nn.Parameter(torch.zeros(3))
+        self.router = ConditionedTokenRouter(text_dim=l_in_channels,
+                                             visual_dim=dim,
+                                             hidden_dim=router_hidden_dim)
+        self.group_fusion = AdaptiveGroupFusion(text_dim=l_in_channels,
+                                                visual_dim=dim,
+                                                hidden_dim=fusion_hidden_dim,
+                                                dropout=dropout)
 
     def forward(self, x, l, l_mask):
-        if not isinstance(l, (tuple, list)) or len(l) != 3:
-            raise RuntimeError('HAPWAM expects a 3-way routed language tuple, got {}'.format(type(l).__name__))
-        l_sem, l_vis, l_ctx = l
+        if isinstance(l, (tuple, list)):
+            raise RuntimeError('HAPWAM-v2 expects raw language features, got {}'.format(type(l).__name__))
+
+        l_tokens = l.permute(0, 2, 1).contiguous()
+        token_mask = l_mask.to(dtype=l_tokens.dtype)
+        visual_summary = x.mean(dim=1)
+        routing_weights = self.router(l_tokens, visual_summary)
+
+        if routing_weights.shape[:2] != l_tokens.shape[:2] or routing_weights.size(-1) != 3:
+            raise RuntimeError('Conditioned token router must return [B, T, 3], got {}'.format(
+                tuple(routing_weights.shape)))
+
+        routed_languages = []
+        for group_idx in range(3):
+            routed_tokens = l_tokens * routing_weights[..., group_idx:group_idx + 1] * token_mask
+            routed_languages.append(routed_tokens.permute(0, 2, 1).contiguous())
+
+        l_sem, l_vis, l_ctx = routed_languages
         fused_sem = self.shared_pwam(x, l_sem, l_mask)
         fused_vis = self.shared_pwam(x, l_vis, l_mask)
         fused_ctx = self.shared_pwam(x, l_ctx, l_mask)
-        group_weights = F.softmax(self.stage_group_logits, dim=0)
-        return (group_weights[0] * fused_sem +
-                group_weights[1] * fused_vis +
-                group_weights[2] * fused_ctx)
+
+        text_summary = (l_tokens * token_mask).sum(dim=1) / token_mask.sum(dim=1).clamp_min(1.0)
+        group_weights = self.group_fusion(text_summary, visual_summary)
+        if group_weights.shape != (x.shape[0], 3):
+            raise RuntimeError('Adaptive group fusion must return [B, 3], got {}'.format(
+                tuple(group_weights.shape)))
+
+        return (group_weights[:, 0].view(-1, 1, 1) * fused_sem +
+                group_weights[:, 1].view(-1, 1, 1) * fused_vis +
+                group_weights[:, 2].view(-1, 1, 1) * fused_ctx)
 
 
 class SpatialImageLanguageAttention(nn.Module):

@@ -30,10 +30,12 @@ def get_parser():
     parser.add_argument('--fusion_drop', default=0.0, type=float, help='dropout rate for PWAMs')
     parser.add_argument('--gate_module', default='none', choices=['none', 'lg', 'hlg'],
                         help='gate module applied after stage-level language alignment')
-    parser.add_argument('--hapwam_hidden_dim', default=128, type=int,
-                        help='hidden dimension of the HAPWAM token routing MLP')
+    parser.add_argument('--hapwam_hidden_dim', default=256, type=int,
+                        help='hidden dimension of the HAPWAM conditioned token router')
+    parser.add_argument('--hapwam_fusion_hidden_dim', default=256, type=int,
+                        help='hidden dimension of the HAPWAM adaptive group fusion MLP')
     parser.add_argument('--hapwam_dropout', default=0.1, type=float,
-                        help='dropout rate of the HAPWAM token routing MLP')
+                        help='dropout rate shared by the HAPWAM adaptive fusion modules')
     parser.add_argument('--hlg_aux_loss_weight', default=0.2, type=float,
                         help='weight for the summed HLG auxiliary loss')
     parser.add_argument('--hlg_false_healthy_weight', default=2.0, type=float,
@@ -100,6 +102,10 @@ def validate_args(args):
         args.text_tokenizer_name = args.text_encoder_name
     if args.max_text_tokens < 1:
         raise ValueError('--max_text_tokens must be >= 1')
+    if args.hapwam_hidden_dim < 1:
+        raise ValueError('--hapwam_hidden_dim must be >= 1')
+    if args.hapwam_fusion_hidden_dim < 1:
+        raise ValueError('--hapwam_fusion_hidden_dim must be >= 1')
 
     align_module = getattr(args, 'align_module', 'none')
     gate_module = getattr(args, 'gate_module', 'none')

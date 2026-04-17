@@ -23,7 +23,8 @@ def _resolve_module_args(args):
         'align_module': align_module,
         'gate_module': gate_module,
         'text_hidden_size': getattr(args, 'text_hidden_size', 768),
-        'hapwam_hidden_dim': getattr(args, 'hapwam_hidden_dim', 128),
+        'hapwam_hidden_dim': getattr(args, 'hapwam_hidden_dim', 256),
+        'hapwam_fusion_hidden_dim': getattr(args, 'hapwam_fusion_hidden_dim', 256),
         'hapwam_dropout': getattr(args, 'hapwam_dropout', 0.1),
         'hlg_hidden_channels': getattr(args, 'hlg_hidden_channels', None),
         'hlg_stages': hlg_stages,
@@ -58,14 +59,17 @@ def _segm_lavt(pretrained, args):
     else:
         window_size = 7
 
+    module_args = _resolve_module_args(args)
+
     if args.mha:
         mha = args.mha.split('-')  # if non-empty, then ['a', 'b', 'c', 'd']
         mha = [int(a) for a in mha]
+    elif module_args['align_module'] == 'hapwam':
+        mha = [1, 1, 4, 8]
     else:
         mha = [1, 1, 1, 1]
 
     out_indices = (0, 1, 2, 3)
-    module_args = _resolve_module_args(args)
     backbone = MultiModalSwinTransformer(embed_dim=embed_dim, depths=depths, num_heads=num_heads,
                                          window_size=window_size,
                                          ape=False, drop_path_rate=0.3, patch_norm=True,
@@ -76,6 +80,7 @@ def _segm_lavt(pretrained, args):
                                          gate_module=module_args['gate_module'],
                                          text_hidden_size=module_args['text_hidden_size'],
                                          hapwam_hidden_dim=module_args['hapwam_hidden_dim'],
+                                         hapwam_fusion_hidden_dim=module_args['hapwam_fusion_hidden_dim'],
                                          hapwam_dropout=module_args['hapwam_dropout'],
                                          hlg_hidden_channels=module_args['hlg_hidden_channels'],
                                          hlg_stages=module_args['hlg_stages']
@@ -135,14 +140,17 @@ def _segm_lavt_one(pretrained, args):
     else:
         window_size = 7
 
+    module_args = _resolve_module_args(args)
+
     if args.mha:
         mha = args.mha.split('-')  # if non-empty, then ['a', 'b', 'c', 'd']
         mha = [int(a) for a in mha]
+    elif module_args['align_module'] == 'hapwam':
+        mha = [1, 1, 4, 8]
     else:
         mha = [1, 1, 1, 1]
 
     out_indices = (0, 1, 2, 3)
-    module_args = _resolve_module_args(args)
     backbone = MultiModalSwinTransformer(embed_dim=embed_dim, depths=depths, num_heads=num_heads,
                                          window_size=window_size,
                                          ape=False, drop_path_rate=0.3, patch_norm=True,
@@ -153,6 +161,7 @@ def _segm_lavt_one(pretrained, args):
                                          gate_module=module_args['gate_module'],
                                          text_hidden_size=module_args['text_hidden_size'],
                                          hapwam_hidden_dim=module_args['hapwam_hidden_dim'],
+                                         hapwam_fusion_hidden_dim=module_args['hapwam_fusion_hidden_dim'],
                                          hapwam_dropout=module_args['hapwam_dropout'],
                                          hlg_hidden_channels=module_args['hlg_hidden_channels'],
                                          hlg_stages=module_args['hlg_stages']
