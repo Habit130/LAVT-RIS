@@ -10,7 +10,7 @@ __all__ = ['lavt', 'lavt_one']
 def _resolve_module_args(args):
     align_module = getattr(args, 'align_module', 'none')
     gate_module = getattr(args, 'gate_module', 'none')
-    hlg_stages = tuple(getattr(args, 'hlg_stages', [3, 4]))
+    hlg_stages = tuple(getattr(args, 'hlg_stages', [3]))
 
     if gate_module in ('lg', 'hlg') and align_module == 'none':
         raise ValueError('gate_module={} requires align_module to be one of plain/pwam/hapwam'.format(gate_module))
