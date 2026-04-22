@@ -45,8 +45,11 @@ def _collect_mask_files(root_dir):
     for path in sorted(root.rglob('*')):
         if not path.is_file() or path.suffix.lower() not in SUPPORTED_EXTENSIONS:
             continue
+        relative_path = path.relative_to(root)
+        if any(part.startswith('.') for part in relative_path.parts):
+            continue
 
-        relative_stem = path.relative_to(root).with_suffix('').as_posix()
+        relative_stem = relative_path.with_suffix('').as_posix()
         if relative_stem in file_map:
             raise ValueError(
                 'Duplicate mask key [{}] under {}. Rename files to make relative stems unique.'
