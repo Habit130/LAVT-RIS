@@ -51,8 +51,9 @@ def evaluate(model, data_loader, text_encoder, device, args):
     header = 'Test:'
 
     if args.dataset == 'plantseg':
-        meter = metrics.BinarySegmentationMeter()
-        save_root = Path(args.save_mask_dir).expanduser().resolve() if args.save_mask_dir else None
+        save_root = Path(args.save_pred_dir).expanduser().resolve() if args.save_pred_dir else None
+        meter = None if save_root is not None else metrics.BinarySegmentationMeter()
+        saved_mask_count = 0
         with torch.no_grad():
             for data in metric_logger.log_every(data_loader, 100, header):
                 image, target, sentences, attentions, mask_paths = data
@@ -63,9 +64,17 @@ def evaluate(model, data_loader, text_encoder, device, args):
 
                 for j in range(sentences.size(-1)):
                     output = forward_model(model, text_encoder, image, sentences[:, :, j], attentions[:, :, j])
-                    meter.update_from_logits(output, target)
                     if save_root is not None:
                         save_prediction_mask(output, mask_paths[0], args, save_root)
+                        saved_mask_count += 1
+                    else:
+                        meter.update_from_logits(output, target)
+
+        if save_root is not None:
+            print('Prediction masks saved to {}'.format(save_root))
+            print('Saved masks: {}'.format(saved_mask_count))
+            print('Run eval_ris_metrics.py separately to compute mIoU, oIoU, Dice, and precision metrics.')
+            return
 
         print('Final results:')
         print(metrics.format_binary_metrics(meter.compute()))
@@ -134,7 +143,7 @@ def computeIoU(pred_seg, gd_seg):
 
 
 def _prediction_tensor_to_bytes(prediction):
-    prediction = prediction.detach().cpu().to(torch.uint8).mul(255).contiguous().view(-1)
+    prediction = prediction.detach().cpu().gt(0).to(torch.uint8).mul(255).contiguous().view(-1)
     return bytes(prediction.tolist())
 
 

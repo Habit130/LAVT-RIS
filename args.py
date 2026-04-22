@@ -64,8 +64,10 @@ def get_parser():
     parser.add_argument('--print-freq', default=10, type=int, help='print frequency')
     parser.add_argument('--refer_data_root', default='./refer/data/', help='REFER dataset root directory')
     parser.add_argument('--resume', default='', help='resume from checkpoint')
-    parser.add_argument('--save_mask_dir', default='',
+    parser.add_argument('--save_pred_dir', default='',
                         help='optional directory for saving predicted masks during testing')
+    parser.add_argument('--save_mask_dir', default=None,
+                        help='deprecated alias of --save_pred_dir')
     parser.add_argument('--split', default='test', help='only used when testing')
     parser.add_argument('--splitBy', default='unc', help='change to umd or google when the dataset is G-Ref (RefCOCOg)')
     parser.add_argument('--swin_type', default='base',
@@ -100,6 +102,13 @@ def validate_args(args):
 
     if not args.text_tokenizer_name:
         args.text_tokenizer_name = args.text_encoder_name
+    if args.save_mask_dir:
+        if not args.save_pred_dir:
+            print('Deprecated argument --save_mask_dir detected; mapping it to --save_pred_dir.')
+            args.save_pred_dir = args.save_mask_dir
+        elif args.save_mask_dir != args.save_pred_dir:
+            print('Ignoring deprecated --save_mask_dir because --save_pred_dir is already set to [{}].'.format(
+                args.save_pred_dir))
     if args.max_text_tokens < 1:
         raise ValueError('--max_text_tokens must be >= 1')
     if args.hapwam_hidden_dim < 1:
