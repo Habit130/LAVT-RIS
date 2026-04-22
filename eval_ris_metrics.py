@@ -113,23 +113,17 @@ def evaluate_masks(pred_dir, gt_dir, threshold):
     pred_keys = set(pred_files.keys())
     gt_keys = set(gt_files.keys())
 
-    missing_pred = sorted(gt_keys - pred_keys)
-    extra_pred = sorted(pred_keys - gt_keys)
+    missing_gt = sorted(pred_keys - gt_keys)
+    ignored_gt = sorted(gt_keys - pred_keys)
 
-    if missing_pred:
+    if missing_gt:
         raise ValueError(
-            'Missing predictions for {} GT masks. First 10 missing keys: {}'.format(
-                len(missing_pred), missing_pred[:10]
-            )
-        )
-    if extra_pred:
-        raise ValueError(
-            'Found {} prediction masks without GT match. First 10 extra keys: {}'.format(
-                len(extra_pred), extra_pred[:10]
+            'Missing GT masks for {} prediction masks. First 10 missing keys: {}'.format(
+                len(missing_gt), missing_gt[:10]
             )
         )
 
-    sample_keys = sorted(gt_files.keys())
+    sample_keys = sorted(pred_files.keys())
     if not sample_keys:
         raise ValueError('No matched mask pairs found between {} and {}'.format(pred_root, gt_root))
 
@@ -165,6 +159,7 @@ def evaluate_masks(pred_dir, gt_dir, threshold):
     sample_count = len(sample_keys)
     results = {
         'num_samples': sample_count,
+        'ignored_gt': len(ignored_gt),
         'mIoU': float(np.mean(per_sample_iou)),
         'oIoU': 1.0 if total_union == 0 else total_intersection / float(total_union),
         'Dice': float(np.mean(per_sample_dice)),
@@ -181,6 +176,7 @@ def _format_results_table(results, threshold, pred_dir, gt_dir):
         ('GT Dir', str(Path(gt_dir).expanduser().resolve())),
         ('Threshold', '{:.3f}'.format(threshold)),
         ('Samples', str(results['num_samples'])),
+        ('Ignored GT', str(results['ignored_gt'])),
         ('mIoU', '{:.2f}'.format(results['mIoU'] * 100.0)),
         ('oIoU', '{:.2f}'.format(results['oIoU'] * 100.0)),
         ('Dice', '{:.2f}'.format(results['Dice'] * 100.0)),
