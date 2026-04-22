@@ -26,8 +26,9 @@ def get_parser():
                         help='device for testing or single-GPU training')
     parser.add_argument('--epochs', default=40, type=int, metavar='N', help='number of total epochs to run')
     parser.add_argument('--align_module', default='hapwam', choices=['none', 'plain', 'pwam', 'hapwam'],
-                        help='stage-level language alignment module')
-    parser.add_argument('--fusion_drop', default=0.0, type=float, help='dropout rate for PWAMs')
+                        help='stage-level language alignment module; plain uses weak masked-mean text pooling with linear projection and spatial broadcast')
+    parser.add_argument('--fusion_drop', default=0.0, type=float,
+                        help='dropout rate for PWAM/HAPWAM fusion modules; plain uses weak pooled-text broadcast and does not apply this dropout')
     parser.add_argument('--gate_module', default='hlg', choices=['none', 'lg', 'hlg'],
                         help='gate module applied after stage-level language alignment')
     parser.add_argument('--hapwam_hidden_dim', default=256, type=int,
@@ -64,8 +65,10 @@ def get_parser():
     parser.add_argument('--print-freq', default=10, type=int, help='print frequency')
     parser.add_argument('--refer_data_root', default='./refer/data/', help='REFER dataset root directory')
     parser.add_argument('--resume', default='', help='resume from checkpoint')
+    parser.add_argument('--save_pred_dir', default='',
+                        help='directory for saving predicted masks during testing; testing metrics are computed separately via eval_ris_metrics.py')
     parser.add_argument('--save_mask_dir', default='',
-                        help='optional directory for saving predicted masks during testing')
+                        help='deprecated alias of --save_pred_dir')
     parser.add_argument('--split', default='test', help='only used when testing')
     parser.add_argument('--splitBy', default='unc', help='change to umd or google when the dataset is G-Ref (RefCOCOg)')
     parser.add_argument('--swin_type', default='base',
@@ -100,6 +103,13 @@ def validate_args(args):
 
     if not args.text_tokenizer_name:
         args.text_tokenizer_name = args.text_encoder_name
+    if args.save_mask_dir:
+        if not args.save_pred_dir:
+            print('Deprecated argument --save_mask_dir detected; mapping it to --save_pred_dir.')
+            args.save_pred_dir = args.save_mask_dir
+        elif args.save_mask_dir != args.save_pred_dir:
+            print('Ignoring deprecated --save_mask_dir because --save_pred_dir is already set to [{}].'.format(
+                args.save_pred_dir))
     if args.max_text_tokens < 1:
         raise ValueError('--max_text_tokens must be >= 1')
     if args.hapwam_hidden_dim < 1:

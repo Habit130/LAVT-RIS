@@ -5,12 +5,10 @@ import torch.utils.data
 from PIL import Image
 
 from lib import segmentation
-import metrics
 from text_encoder import (build_text_encoder, encode_text, get_checkpoint_text_encoder_state,
                           prepare_text_encoder_args)
 import transforms as T
 import utils
-import numpy as np
 
 
 def allow_partial_checkpoint_load(args):
@@ -44,77 +42,33 @@ def forward_model(model, text_encoder, image, sentences, attentions):
     return model(image, sentences, l_mask=attentions)
 
 
-def evaluate(model, data_loader, text_encoder, device, args):
+def save_predictions(model, data_loader, text_encoder, device, args):
     model.eval()
     metric_logger = utils.MetricLogger(delimiter="  ")
 
     header = 'Test:'
+    save_root = Path(args.save_pred_dir).expanduser().resolve()
 
-    if args.dataset == 'plantseg':
-        meter = metrics.BinarySegmentationMeter()
-        save_root = Path(args.save_mask_dir).expanduser().resolve() if args.save_mask_dir else None
-        with torch.no_grad():
-            for data in metric_logger.log_every(data_loader, 100, header):
-                image, target, sentences, attentions, mask_paths = data
-                image = image.to(device)
-                target = target.to(device)
-                sentences = sentences.to(device).squeeze(1)
-                attentions = attentions.to(device).squeeze(1)
+    if args.dataset != 'plantseg':
+        raise ValueError('Saving prediction masks currently requires dataset metadata with GT mask relative paths; '
+                         '--dataset plantseg is supported in test.py.')
 
-                for j in range(sentences.size(-1)):
-                    output = forward_model(model, text_encoder, image, sentences[:, :, j], attentions[:, :, j])
-                    meter.update_from_logits(output, target)
-                    if save_root is not None:
-                        save_prediction_mask(output, mask_paths[0], args, save_root)
-
-        print('Final results:')
-        print(metrics.format_binary_metrics(meter.compute()))
-        return
-
-    cum_I, cum_U = 0, 0
-    eval_seg_iou_list = [.5, .6, .7, .8, .9]
-    seg_correct = np.zeros(len(eval_seg_iou_list), dtype=np.int32)
-    seg_total = 0
-    mean_IoU = []
-
+    save_count = 0
     with torch.no_grad():
         for data in metric_logger.log_every(data_loader, 100, header):
-            image, target, sentences, attentions = data
-            image, target, sentences, attentions = image.to(device), target.to(device), \
-                                                   sentences.to(device), attentions.to(device)
-            sentences = sentences.squeeze(1)
-            attentions = attentions.squeeze(1)
-            target = target.cpu().data.numpy()
+            image, _target, sentences, attentions, mask_paths = data
+            image = image.to(device)
+            sentences = sentences.to(device).squeeze(1)
+            attentions = attentions.to(device).squeeze(1)
+
             for j in range(sentences.size(-1)):
                 output = forward_model(model, text_encoder, image, sentences[:, :, j], attentions[:, :, j])
-                output = output.cpu()
-                output_mask = output.argmax(1).data.numpy()
-                I, U = computeIoU(output_mask, target)
-                if U == 0:
-                    this_iou = 0.0
-                else:
-                    this_iou = I*1.0/U
-                mean_IoU.append(this_iou)
-                cum_I += I
-                cum_U += U
-                for n_eval_iou in range(len(eval_seg_iou_list)):
-                    eval_seg_iou = eval_seg_iou_list[n_eval_iou]
-                    seg_correct[n_eval_iou] += (this_iou >= eval_seg_iou)
-                seg_total += 1
+                save_prediction_mask(output, mask_paths[0], args, save_root)
+                save_count += 1
 
-            del image, target, sentences, attentions, output, output_mask
+            del image, sentences, attentions, output
 
-    mean_IoU = np.array(mean_IoU)
-    mIoU = np.mean(mean_IoU)
-    overall_iou = float(cum_I * 100. / cum_U) if cum_U != 0 else 0.0
-    print('Final results:')
-    print('Mean IoU is %.2f\n' % (mIoU*100.))
-    results_str = ''
-    for n_eval_iou in range(len(eval_seg_iou_list)):
-        results_str += '    precision@%s = %.2f\n' % \
-                       (str(eval_seg_iou_list[n_eval_iou]), seg_correct[n_eval_iou] * 100. / seg_total)
-    results_str += '    overall IoU = %.2f\n' % overall_iou
-    print(results_str)
+    print('Saved {} prediction masks to {}'.format(save_count, save_root))
 
 
 def get_transform(args):
@@ -124,13 +78,6 @@ def get_transform(args):
                   ]
 
     return T.Compose(transforms)
-
-
-def computeIoU(pred_seg, gd_seg):
-    I = np.sum(np.logical_and(pred_seg, gd_seg))
-    U = np.sum(np.logical_or(pred_seg, gd_seg))
-
-    return I, U
 
 
 def _prediction_tensor_to_bytes(prediction):
@@ -147,16 +94,22 @@ def save_prediction_mask(logits, mask_relative_path, args, save_root):
     with Image.open(reference_mask_path) as reference_mask:
         if mask_image.size != reference_mask.size:
             mask_image = mask_image.resize(reference_mask.size, resample=Image.NEAREST)
-        if reference_mask.mode != mask_image.mode:
-            mask_image = mask_image.convert(reference_mask.mode)
 
-    output_path = save_root / mask_relative_path
+    gt_mask_root = Path(args.plantseg_root).expanduser().resolve() / 'ann'
+    try:
+        relative_output_path = reference_mask_path.relative_to(gt_mask_root)
+    except ValueError:
+        relative_output_path = Path(mask_relative_path)
+
+    output_path = save_root / relative_output_path
     output_path.parent.mkdir(parents=True, exist_ok=True)
     mask_image.save(output_path)
 
 
 def main(args):
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
+    if not args.save_pred_dir:
+        raise ValueError('test.py now only generates prediction masks; please specify --save_pred_dir.')
     text_encoder_config = prepare_text_encoder_args(args)
     dataset_test, _ = get_dataset(args.split, get_transform(args=args), args)
     test_sampler = torch.utils.data.SequentialSampler(dataset_test)
@@ -183,7 +136,7 @@ def main(args):
     else:
         text_encoder = None
 
-    evaluate(model, data_loader_test, text_encoder, device=device, args=args)
+    save_predictions(model, data_loader_test, text_encoder, device=device, args=args)
 
 
 if __name__ == "__main__":

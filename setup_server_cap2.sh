@@ -127,7 +127,7 @@ Train command:
   cd "$REPO_ROOT" && source "$CONDA_SH" && conda activate "$ENV_NAME" && python train.py --model lavt_one --dataset plantseg --model_id "$MODEL_ID" --batch-size 4 --lr 1e-5 --wd 1e-2 --swin_type base --window12 --img_size 480 --epochs 40 --workers 4 --pin_mem --device cuda:0 --plantseg_root "$PLANTSEG_ROOT" --plantseg_caption_index 2 --text_encoder_name "$TEXT_ENCODER_NAME" --max_text_tokens "$MAX_TEXT_TOKENS" --pretrained_swin_weights "$SWIN_PATH"
 
 Test command:
-  cd "$REPO_ROOT" && source "$CONDA_SH" && conda activate "$ENV_NAME" && python test.py --model lavt_one --dataset plantseg --split test --swin_type base --window12 --img_size 480 --workers 4 --device cuda:0 --plantseg_root "$PLANTSEG_ROOT" --plantseg_caption_index 2 --text_encoder_name "$TEXT_ENCODER_NAME" --max_text_tokens "$MAX_TEXT_TOKENS" --resume "$REPO_ROOT/checkpoints/model_best_${MODEL_ID}.pth" --save_mask_dir "$MASK_SAVE_DIR"
+  cd "$REPO_ROOT" && source "$CONDA_SH" && conda activate "$ENV_NAME" && python test.py --model lavt_one --dataset plantseg --split test --swin_type base --window12 --img_size 480 --workers 4 --device cuda:0 --plantseg_root "$PLANTSEG_ROOT" --plantseg_caption_index 2 --text_encoder_name "$TEXT_ENCODER_NAME" --max_text_tokens "$MAX_TEXT_TOKENS" --resume "$REPO_ROOT/checkpoints/model_best_${MODEL_ID}.pth" --save_pred_dir "$MASK_SAVE_DIR"
 
 EOF
 }

@@ -6,6 +6,8 @@ from PIL import Image
 
 
 SUPPORTED_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff'}
+DEFAULT_THRESHOLD = 0.5
+DEFAULT_PRECISION_THRESHOLDS = (0.5, 0.7, 0.9)
 
 
 def parse_args():
@@ -24,7 +26,7 @@ def parse_args():
     )
     parser.add_argument(
         '--threshold',
-        default=0.5,
+        default=DEFAULT_THRESHOLD,
         type=float,
         help='threshold for binarizing prediction masks when they are not already binary',
     )
@@ -109,6 +111,53 @@ def _compute_sample_metrics(pred_mask, gt_mask):
     }
 
 
+def evaluate_mask_arrays(pred_masks, gt_masks, threshold=DEFAULT_THRESHOLD,
+                         precision_thresholds=DEFAULT_PRECISION_THRESHOLDS):
+    if len(pred_masks) != len(gt_masks):
+        raise ValueError('Prediction and GT counts differ: {} vs {}'.format(len(pred_masks), len(gt_masks)))
+    if not pred_masks:
+        raise ValueError('No prediction / GT mask pairs provided for evaluation.')
+
+    per_sample_iou = []
+    per_sample_dice = []
+    total_intersection = 0
+    total_union = 0
+    precision_hits = {float(item): 0 for item in precision_thresholds}
+
+    for index, (pred_array, gt_array) in enumerate(zip(pred_masks, gt_masks)):
+        pred_array = np.asarray(pred_array)
+        gt_array = np.asarray(gt_array)
+
+        if pred_array.shape != gt_array.shape:
+            raise ValueError(
+                'Shape mismatch at index {}: prediction {} vs GT {}'.format(index, pred_array.shape, gt_array.shape)
+            )
+
+        pred_mask = _binarize_prediction(pred_array, threshold)
+        gt_mask = _binarize_ground_truth(gt_array)
+        sample_metrics = _compute_sample_metrics(pred_mask, gt_mask)
+
+        per_sample_iou.append(sample_metrics['iou'])
+        per_sample_dice.append(sample_metrics['dice'])
+        total_intersection += sample_metrics['intersection']
+        total_union += sample_metrics['union']
+
+        for precision_threshold in precision_hits:
+            precision_hits[precision_threshold] += int(sample_metrics['iou'] >= precision_threshold)
+
+    sample_count = len(pred_masks)
+    return {
+        'num_samples': sample_count,
+        'ignored_gt': 0,
+        'mIoU': float(np.mean(per_sample_iou)),
+        'oIoU': 1.0 if total_union == 0 else total_intersection / float(total_union),
+        'Dice': float(np.mean(per_sample_dice)),
+        'P@0.5': precision_hits.get(0.5, 0) / float(sample_count),
+        'P@0.7': precision_hits.get(0.7, 0) / float(sample_count),
+        'P@0.9': precision_hits.get(0.9, 0) / float(sample_count),
+    }
+
+
 def evaluate_masks(pred_dir, gt_dir, threshold):
     pred_root, pred_files = _collect_mask_files(pred_dir)
     gt_root, gt_files = _collect_mask_files(gt_dir)
@@ -130,11 +179,8 @@ def evaluate_masks(pred_dir, gt_dir, threshold):
     if not sample_keys:
         raise ValueError('No matched mask pairs found between {} and {}'.format(pred_root, gt_root))
 
-    per_sample_iou = []
-    per_sample_dice = []
-    total_intersection = 0
-    total_union = 0
-    precision_hits = {0.5: 0, 0.7: 0, 0.9: 0}
+    pred_arrays = []
+    gt_arrays = []
 
     for key in sample_keys:
         pred_array = _load_grayscale_mask(pred_files[key])
@@ -147,29 +193,11 @@ def evaluate_masks(pred_dir, gt_dir, threshold):
                 )
             )
 
-        pred_mask = _binarize_prediction(pred_array, threshold)
-        gt_mask = _binarize_ground_truth(gt_array)
-        sample_metrics = _compute_sample_metrics(pred_mask, gt_mask)
+        pred_arrays.append(pred_array)
+        gt_arrays.append(gt_array)
 
-        per_sample_iou.append(sample_metrics['iou'])
-        per_sample_dice.append(sample_metrics['dice'])
-        total_intersection += sample_metrics['intersection']
-        total_union += sample_metrics['union']
-
-        for precision_threshold in precision_hits:
-            precision_hits[precision_threshold] += int(sample_metrics['iou'] >= precision_threshold)
-
-    sample_count = len(sample_keys)
-    results = {
-        'num_samples': sample_count,
-        'ignored_gt': len(ignored_gt),
-        'mIoU': float(np.mean(per_sample_iou)),
-        'oIoU': 1.0 if total_union == 0 else total_intersection / float(total_union),
-        'Dice': float(np.mean(per_sample_dice)),
-        'P@0.5': precision_hits[0.5] / float(sample_count),
-        'P@0.7': precision_hits[0.7] / float(sample_count),
-        'P@0.9': precision_hits[0.9] / float(sample_count),
-    }
+    results = evaluate_mask_arrays(pred_arrays, gt_arrays, threshold=threshold)
+    results['ignored_gt'] = len(ignored_gt)
     return results
 
 
@@ -197,6 +225,17 @@ def _format_results_table(results, threshold, pred_dir, gt_dir):
         lines.append('| {:{}} | {:{}} |'.format(key, key_width, value, value_width))
     lines.append(border)
     return '\n'.join(lines)
+
+
+def format_metrics_summary(results):
+    return '\n'.join([
+        'mIoU: {:.2f}'.format(results['mIoU'] * 100.0),
+        'oIoU: {:.2f}'.format(results['oIoU'] * 100.0),
+        'Dice: {:.2f}'.format(results['Dice'] * 100.0),
+        'P@0.5: {:.2f}'.format(results['P@0.5'] * 100.0),
+        'P@0.7: {:.2f}'.format(results['P@0.7'] * 100.0),
+        'P@0.9: {:.2f}'.format(results['P@0.9'] * 100.0),
+    ])
 
 
 def main():

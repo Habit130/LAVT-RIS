@@ -1,8 +1,8 @@
 import torch
 import torch.utils.data
 
+from eval_ris_metrics import evaluate_mask_arrays, format_metrics_summary
 from lib import segmentation
-import metrics
 from test import (allow_partial_checkpoint_load, forward_model, get_dataset,
                   get_transform)
 from text_encoder import (build_text_encoder, get_checkpoint_text_encoder_state,
@@ -40,8 +40,10 @@ def evaluate_refined_groups(model, data_loader, dataset, text_encoder, device):
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Test by refine group:'
 
-    refined_meter = metrics.BinarySegmentationMeter()
-    unrefined_meter = metrics.BinarySegmentationMeter()
+    refined_predictions = []
+    refined_targets = []
+    unrefined_predictions = []
+    unrefined_targets = []
     refined_count = 0
     unrefined_count = 0
 
@@ -50,7 +52,6 @@ def evaluate_refined_groups(model, data_loader, dataset, text_encoder, device):
             image, target, sentences, attentions, _mask_paths = data
             sample = dataset.samples[index]
             is_refined = bool(sample.get('is_refined', False))
-            meter = refined_meter if is_refined else unrefined_meter
 
             image = image.to(device)
             target = target.to(device)
@@ -59,7 +60,14 @@ def evaluate_refined_groups(model, data_loader, dataset, text_encoder, device):
 
             for sentence_idx in range(sentences.size(-1)):
                 output = forward_model(model, text_encoder, image, sentences[:, :, sentence_idx], attentions[:, :, sentence_idx])
-                meter.update_from_logits(output, target)
+                prediction = output.argmax(1).detach().cpu().numpy()
+                target_np = target.detach().cpu().numpy()
+                if is_refined:
+                    refined_predictions.extend(list(prediction))
+                    refined_targets.extend(list(target_np))
+                else:
+                    unrefined_predictions.extend(list(prediction))
+                    unrefined_targets.extend(list(target_np))
 
             if is_refined:
                 refined_count += 1
@@ -67,10 +75,16 @@ def evaluate_refined_groups(model, data_loader, dataset, text_encoder, device):
                 unrefined_count += 1
 
     print('Refined samples: {}'.format(refined_count))
-    print(metrics.format_binary_metrics(refined_meter.compute()))
+    if refined_predictions:
+        print(format_metrics_summary(evaluate_mask_arrays(refined_predictions, refined_targets)))
+    else:
+        print('No refined samples available for evaluation.')
     print('')
     print('Unrefined samples: {}'.format(unrefined_count))
-    print(metrics.format_binary_metrics(unrefined_meter.compute()))
+    if unrefined_predictions:
+        print(format_metrics_summary(evaluate_mask_arrays(unrefined_predictions, unrefined_targets)))
+    else:
+        print('No unrefined samples available for evaluation.')
 
 
 def main(args):

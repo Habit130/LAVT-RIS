@@ -5,15 +5,13 @@ import os
 import time
 from functools import reduce
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.utils.data
 from torch import nn
 
+from eval_ris_metrics import evaluate_mask_arrays, format_metrics_summary
 from lib import segmentation
-
-import metrics
 from text_encoder import (TEXT_ENCODER_MODEL_KEY, build_text_encoder, encode_text,
                           get_checkpoint_text_encoder_state, get_text_encoder_layers,
                           prepare_text_encoder_args)
@@ -37,20 +35,6 @@ def get_dataset(image_set, transform, args):
                                target_transforms=None)
     num_classes = 2
     return dataset, num_classes
-
-
-def iou(pred, gt):
-    pred = pred.argmax(1)
-
-    intersection = torch.sum(torch.mul(pred, gt))
-    union = torch.sum(torch.add(pred, gt)) - intersection
-
-    if intersection == 0 or union == 0:
-        score = 0
-    else:
-        score = float(intersection) / float(union)
-
-    return score, intersection, union
 
 
 def get_transform(args):
@@ -154,36 +138,11 @@ def evaluate(model, data_loader, text_encoder, device, args):
     model.eval()
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Val:'
-
-    if args.dataset == 'plantseg':
-        meter = metrics.BinarySegmentationMeter()
-        with torch.no_grad():
-            for data in metric_logger.log_every(data_loader, 100, header):
-                image, target, sentences, attentions, _, _ = unpack_batch(data)
-                image = image.to(device, non_blocking=device.type == 'cuda')
-                target = target.to(device, non_blocking=device.type == 'cuda')
-                sentences = sentences.to(device, non_blocking=device.type == 'cuda').squeeze(1)
-                attentions = attentions.to(device, non_blocking=device.type == 'cuda').squeeze(1)
-
-                output = forward_model(model, text_encoder, image, sentences, attentions)
-                meter.update_from_logits(output, target)
-
-        result = meter.compute()
-        print('Final results:')
-        print(metrics.format_binary_metrics(result))
-        return result
-
-    total_its = 0
-    acc_ious = 0
-    cum_I, cum_U = 0, 0
-    eval_seg_iou_list = [.5, .6, .7, .8, .9]
-    seg_correct = np.zeros(len(eval_seg_iou_list), dtype=np.int32)
-    seg_total = 0
-    mean_IoU = []
+    pred_masks = []
+    gt_masks = []
 
     with torch.no_grad():
         for data in metric_logger.log_every(data_loader, 100, header):
-            total_its += 1
             image, target, sentences, attentions, _, _ = unpack_batch(data)
             image = image.to(device, non_blocking=device.type == 'cuda')
             target = target.to(device, non_blocking=device.type == 'cuda')
@@ -191,29 +150,15 @@ def evaluate(model, data_loader, text_encoder, device, args):
             attentions = attentions.to(device, non_blocking=device.type == 'cuda').squeeze(1)
 
             output = forward_model(model, text_encoder, image, sentences, attentions)
+            prediction = output.argmax(1).detach().cpu().numpy()
+            target_np = target.detach().cpu().numpy()
+            pred_masks.extend(list(prediction))
+            gt_masks.extend(list(target_np))
 
-            this_iou, intersection, union = iou(output, target)
-            acc_ious += this_iou
-            mean_IoU.append(this_iou)
-            cum_I += intersection
-            cum_U += union
-            for n_eval_iou, eval_seg_iou in enumerate(eval_seg_iou_list):
-                seg_correct[n_eval_iou] += (this_iou >= eval_seg_iou)
-            seg_total += 1
-        avg_iou = acc_ious / total_its
-
-    mean_IoU = np.array(mean_IoU)
-    mIoU = np.mean(mean_IoU)
-    overall_iou = float(cum_I * 100. / cum_U) if cum_U != 0 else 0.0
+    result = evaluate_mask_arrays(pred_masks, gt_masks)
     print('Final results:')
-    print('Mean IoU is %.2f\n' % (mIoU * 100.))
-    results_str = ''
-    for n_eval_iou, eval_seg_iou in enumerate(eval_seg_iou_list):
-        results_str += '    precision@%s = %.2f\n' % (str(eval_seg_iou), seg_correct[n_eval_iou] * 100. / seg_total)
-    results_str += '    overall IoU = %.2f\n' % overall_iou
-    print(results_str)
-
-    return 100 * avg_iou, overall_iou
+    print(format_metrics_summary(result))
+    return result
 
 
 def train_one_epoch(model, criterion_fn, optimizer, data_loader, lr_scheduler, epoch, print_freq,
@@ -395,16 +340,7 @@ def main(args):
         train_one_epoch(model, criterion, optimizer, data_loader, lr_scheduler, epoch,
                         args.print_freq, iterations, text_encoder, device, args)
         validation_result = evaluate(model, data_loader_val, text_encoder, device, args)
-
-        if args.dataset == 'plantseg':
-            print('Foreground IoU {}'.format(validation_result['fg_iou'] * 100.0))
-            print('mIoU {}'.format(validation_result['miou'] * 100.0))
-            current_score = validation_result['fg_iou']
-        else:
-            avg_iou, overall_iou = validation_result
-            print('Average object IoU {}'.format(avg_iou))
-            print('Overall IoU {}'.format(overall_iou))
-            current_score = overall_iou / 100.0
+        current_score = validation_result['oIoU']
 
         if best_score < current_score:
             print('Better epoch: {}\n'.format(epoch))
