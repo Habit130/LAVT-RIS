@@ -26,9 +26,9 @@ def get_parser():
                         help='device for testing or single-GPU training')
     parser.add_argument('--epochs', default=40, type=int, metavar='N', help='number of total epochs to run')
     parser.add_argument('--align_module', default='hapwam', choices=['none', 'plain', 'pwam', 'hapwam'],
-                        help='stage-level language alignment module; plain uses weak masked-mean text pooling with linear projection and spatial broadcast')
+                        help='stage-level language alignment module; plain uses weak masked-mean text pooling with linear projection and additive visual conditioning')
     parser.add_argument('--fusion_drop', default=0.0, type=float,
-                        help='dropout rate for PWAM/HAPWAM fusion modules; plain uses weak pooled-text broadcast and does not apply this dropout')
+                        help='dropout rate for plain/PWAM/HAPWAM fusion modules')
     parser.add_argument('--gate_module', default='hlg', choices=['none', 'lg', 'hlg'],
                         help='gate module applied after stage-level language alignment')
     parser.add_argument('--hapwam_hidden_dim', default=256, type=int,
