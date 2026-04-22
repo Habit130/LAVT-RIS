@@ -78,6 +78,7 @@ def main(args):
         raise ValueError('test_refined_unrefined.py only supports --dataset plantseg')
 
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
+    prepare_text_encoder_args(args)
     dataset_test, _ = get_dataset(args.split, get_transform(args=args), args)
     test_sampler = torch.utils.data.SequentialSampler(dataset_test)
     data_loader_test = torch.utils.data.DataLoader(dataset_test,
