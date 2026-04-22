@@ -60,14 +60,14 @@ def evaluate_refined_groups(model, data_loader, dataset, text_encoder, device):
 
             for sentence_idx in range(sentences.size(-1)):
                 output = forward_model(model, text_encoder, image, sentences[:, :, sentence_idx], attentions[:, :, sentence_idx])
-                prediction = output.argmax(1).detach().cpu().numpy()
-                target_np = target.detach().cpu().numpy()
+                prediction = output.argmax(1).detach().cpu().tolist()
+                target_list = target.detach().cpu().tolist()
                 if is_refined:
-                    refined_predictions.extend(list(prediction))
-                    refined_targets.extend(list(target_np))
+                    refined_predictions.extend(prediction)
+                    refined_targets.extend(target_list)
                 else:
-                    unrefined_predictions.extend(list(prediction))
-                    unrefined_targets.extend(list(target_np))
+                    unrefined_predictions.extend(prediction)
+                    unrefined_targets.extend(target_list)
 
             if is_refined:
                 refined_count += 1

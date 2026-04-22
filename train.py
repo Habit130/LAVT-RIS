@@ -150,10 +150,10 @@ def evaluate(model, data_loader, text_encoder, device, args):
             attentions = attentions.to(device, non_blocking=device.type == 'cuda').squeeze(1)
 
             output = forward_model(model, text_encoder, image, sentences, attentions)
-            prediction = output.argmax(1).detach().cpu().numpy()
-            target_np = target.detach().cpu().numpy()
-            pred_masks.extend(list(prediction))
-            gt_masks.extend(list(target_np))
+            prediction = output.argmax(1).detach().cpu().tolist()
+            target_list = target.detach().cpu().tolist()
+            pred_masks.extend(prediction)
+            gt_masks.extend(target_list)
 
     result = evaluate_mask_arrays(pred_masks, gt_masks)
     print('Final results:')

@@ -95,7 +95,7 @@ class ToTensor(object):
         if image.mode != "RGB":
             image = image.convert("RGB")
         channels = len(image.getbands())
-        tensor = torch.frombuffer(image.tobytes(), dtype=torch.uint8)
+        tensor = torch.frombuffer(bytearray(image.tobytes()), dtype=torch.uint8)
         tensor = tensor.view(image.size[1], image.size[0], channels).clone()
         tensor = tensor.permute(2, 0, 1).contiguous()
         return tensor.float().div(255.0)
@@ -103,7 +103,7 @@ class ToTensor(object):
     @staticmethod
     def _pil_mask_to_tensor(mask):
         mask = mask.convert("L")
-        tensor = torch.frombuffer(mask.tobytes(), dtype=torch.uint8)
+        tensor = torch.frombuffer(bytearray(mask.tobytes()), dtype=torch.uint8)
         tensor = tensor.view(mask.size[1], mask.size[0]).clone().contiguous()
         return tensor.gt(0).to(dtype=torch.int64)
 
