@@ -122,7 +122,8 @@ def should_return_aux(args):
 
 
 def allow_partial_checkpoint_load(args):
-    return getattr(args, 'align_module', 'none') in ('plain', 'hapwam') or getattr(args, 'gate_module', 'none') == 'hlg'
+    return getattr(args, 'align_module', 'none') in ('plain', 'spam', 'hapwam') or \
+        getattr(args, 'gate_module', 'none') == 'hlg'
 
 
 def forward_model(model, text_encoder, image, sentences, attentions, return_aux=False):

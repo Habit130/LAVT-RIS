@@ -30,35 +30,6 @@ class Mlp(nn.Module):
         return x
 
 
-class ConditionedTokenRouter(nn.Module):
-    def __init__(self, text_dim, visual_dim, hidden_dim=256):
-        super().__init__()
-        self.text_proj = nn.Linear(text_dim, hidden_dim)
-        self.visual_proj = nn.Linear(visual_dim, hidden_dim)
-        self.fusion = nn.GELU()
-        self.out_proj = nn.Linear(hidden_dim, 3)
-
-    def forward(self, text_tokens, visual_summary):
-        conditioned = self.text_proj(text_tokens) + self.visual_proj(visual_summary).unsqueeze(1)
-        logits = self.out_proj(self.fusion(conditioned))
-        return F.softmax(logits, dim=-1)
-
-
-class AdaptiveGroupFusion(nn.Module):
-    def __init__(self, text_dim, visual_dim, hidden_dim=256, dropout=0.1):
-        super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(text_dim + visual_dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 3)
-        )
-
-    def forward(self, text_summary, visual_summary):
-        fusion_input = torch.cat([text_summary, visual_summary], dim=-1)
-        return F.softmax(self.mlp(fusion_input), dim=-1)
-
-
 def window_partition(x, window_size):
     """
     Args:
@@ -436,12 +407,13 @@ class MultiModalSwinTransformer(nn.Module):
                  ):
         super().__init__()
 
-        if align_module not in ('none', 'plain', 'pwam', 'hapwam'):
+        if align_module not in ('none', 'plain', 'pwam', 'spam', 'hapwam'):
             raise ValueError('Unsupported align_module: {}'.format(align_module))
         if gate_module not in ('none', 'lg', 'hlg'):
             raise ValueError('Unsupported gate_module: {}'.format(gate_module))
         if gate_module in ('lg', 'hlg') and align_module == 'none':
-            raise ValueError('gate_module={} requires align_module to be one of plain/pwam/hapwam'.format(gate_module))
+            raise ValueError(
+                'gate_module={} requires align_module to be one of plain/pwam/spam/hapwam'.format(gate_module))
 
         self.pretrain_img_size = pretrain_img_size
         self.num_layers = len(depths)
@@ -653,12 +625,12 @@ class MMBasicLayer(nn.Module):
             self.fusion = PlainTextFusion(dim, text_hidden_size, dropout=fusion_drop)
         elif align_module == 'pwam':
             self.fusion = PWAM(dim, dim, text_hidden_size, dim, dim, num_heads=num_heads_fusion, dropout=fusion_drop)
-        elif align_module == 'hapwam':
-            self.fusion = HAPWAM(dim, dim, text_hidden_size, dim, dim,
-                                 num_heads=num_heads_fusion,
-                                 router_hidden_dim=hapwam_hidden_dim,
-                                 fusion_hidden_dim=hapwam_fusion_hidden_dim,
-                                 dropout=fusion_drop)
+        elif align_module in ('spam', 'hapwam'):
+            self.fusion = SPAM(dim, dim, text_hidden_size, dim, dim,
+                               num_heads=num_heads_fusion,
+                               router_hidden_dim=hapwam_hidden_dim,
+                               fusion_hidden_dim=hapwam_fusion_hidden_dim,
+                               dropout=fusion_drop)
         else:
             self.fusion = None
 
@@ -786,52 +758,120 @@ class PWAM(nn.Module):
         return mm
 
 
-class HAPWAM(nn.Module):
+class SPAM(nn.Module):
     def __init__(self, dim, v_in_channels, l_in_channels, key_channels, value_channels,
                  num_heads=0, router_hidden_dim=256, fusion_hidden_dim=256, dropout=0.0):
-        super(HAPWAM, self).__init__()
-        self.shared_pwam = PWAM(dim, v_in_channels, l_in_channels, key_channels, value_channels,
-                                num_heads=num_heads, dropout=dropout)
-        self.router = ConditionedTokenRouter(text_dim=l_in_channels,
-                                             visual_dim=dim,
-                                             hidden_dim=router_hidden_dim)
-        self.group_fusion = AdaptiveGroupFusion(text_dim=l_in_channels,
-                                                visual_dim=dim,
-                                                hidden_dim=fusion_hidden_dim,
-                                                dropout=dropout)
+        super(SPAM, self).__init__()
+        num_heads = max(1, int(num_heads))
+        if key_channels % num_heads != 0:
+            raise ValueError('key_channels={} must be divisible by num_heads={}'.format(key_channels, num_heads))
+        if value_channels % num_heads != 0:
+            raise ValueError('value_channels={} must be divisible by num_heads={}'.format(value_channels, num_heads))
+
+        self.dim = dim
+        self.v_in_channels = v_in_channels
+        self.l_in_channels = l_in_channels
+        self.key_channels = key_channels
+        self.value_channels = value_channels
+        self.num_heads = num_heads
+
+        self.vis_project = nn.Sequential(
+            nn.Conv1d(dim, dim, 1, 1),
+            nn.GELU(),
+            nn.Dropout(dropout)
+        )
+
+        self.f_query = nn.Sequential(
+            nn.Conv1d(v_in_channels, key_channels, kernel_size=1, stride=1),
+            nn.GroupNorm(1, key_channels),
+        )
+        self.f_key = nn.Conv1d(l_in_channels, key_channels, kernel_size=1, stride=1)
+        self.f_value = nn.Conv1d(l_in_channels, value_channels, kernel_size=1, stride=1)
+        self.lang_out = nn.Sequential(
+            nn.Conv1d(value_channels, value_channels, kernel_size=1, stride=1),
+            nn.GroupNorm(1, value_channels),
+        )
+
+        self.token_text_proj = nn.Linear(l_in_channels, router_hidden_dim)
+        self.token_visual_proj = nn.Linear(dim, router_hidden_dim)
+        self.token_score = nn.Sequential(
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(router_hidden_dim, 1),
+            nn.Sigmoid()
+        )
+
+        self.anomaly_score = nn.Sequential(
+            nn.Linear(dim, fusion_hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(fusion_hidden_dim, 1),
+            nn.Sigmoid()
+        )
+
+        self.project_mm = nn.Sequential(
+            nn.Conv1d(value_channels, value_channels, 1, 1),
+            nn.GELU(),
+            nn.Dropout(dropout)
+        )
 
     def forward(self, x, l, l_mask):
         if isinstance(l, (tuple, list)):
-            raise RuntimeError('HAPWAM-v2 expects raw language features, got {}'.format(type(l).__name__))
+            raise RuntimeError('SPAM expects raw language features, got {}'.format(type(l).__name__))
+
+        B, HW = x.size(0), x.size(1)
+        if l_mask.dim() == 2:
+            token_mask = l_mask.unsqueeze(-1)
+        elif l_mask.dim() == 3:
+            token_mask = l_mask
+        else:
+            raise RuntimeError('SPAM expects l_mask with shape [B, T] or [B, T, 1], got {}'.format(
+                tuple(l_mask.shape)))
 
         l_tokens = l.permute(0, 2, 1).contiguous()
-        token_mask = l_mask.to(dtype=l_tokens.dtype)
+        token_mask = token_mask.to(device=l_tokens.device, dtype=l_tokens.dtype)
+        if token_mask.shape[:2] != l_tokens.shape[:2]:
+            raise RuntimeError('SPAM mask shape {} does not match language tokens {}'.format(
+                tuple(token_mask.shape), tuple(l_tokens.shape)))
+
         visual_summary = x.mean(dim=1)
-        routing_weights = self.router(l_tokens, visual_summary)
+        token_context = self.token_text_proj(l_tokens) + self.token_visual_proj(visual_summary).unsqueeze(1)
+        token_importance = self.token_score(token_context) * token_mask
 
-        if routing_weights.shape[:2] != l_tokens.shape[:2] or routing_weights.size(-1) != 3:
-            raise RuntimeError('Conditioned token router must return [B, T, 3], got {}'.format(
-                tuple(routing_weights.shape)))
+        x_channels = x.permute(0, 2, 1).contiguous()
+        vis = self.vis_project(x_channels)
+        query = self.f_query(x_channels).permute(0, 2, 1).contiguous()
 
-        routed_languages = []
-        for group_idx in range(3):
-            routed_tokens = l_tokens * routing_weights[..., group_idx:group_idx + 1] * token_mask
-            routed_languages.append(routed_tokens.permute(0, 2, 1).contiguous())
+        mask_channels = token_mask.permute(0, 2, 1).contiguous()
+        key = self.f_key(l) * mask_channels
+        value = self.f_value(l) * token_importance.permute(0, 2, 1).contiguous()
 
-        l_sem, l_vis, l_ctx = routed_languages
-        fused_sem = self.shared_pwam(x, l_sem, l_mask)
-        fused_vis = self.shared_pwam(x, l_vis, l_mask)
-        fused_ctx = self.shared_pwam(x, l_ctx, l_mask)
+        n_l = value.size(-1)
+        head_key_channels = self.key_channels // self.num_heads
+        head_value_channels = self.value_channels // self.num_heads
+        query = query.reshape(B, HW, self.num_heads, head_key_channels).permute(0, 2, 1, 3)
+        key = key.reshape(B, self.num_heads, head_key_channels, n_l)
+        value = value.reshape(B, self.num_heads, head_value_channels, n_l)
 
-        text_summary = (l_tokens * token_mask).sum(dim=1) / token_mask.sum(dim=1).clamp_min(1.0)
-        group_weights = self.group_fusion(text_summary, visual_summary)
-        if group_weights.shape != (x.shape[0], 3):
-            raise RuntimeError('Adaptive group fusion must return [B, 3], got {}'.format(
-                tuple(group_weights.shape)))
+        attn_mask = mask_channels.unsqueeze(1)
+        sim_map = torch.matmul(query, key) * (head_key_channels ** -0.5)
+        sim_map = sim_map.masked_fill(attn_mask <= 0, -1e4)
+        sim_map = F.softmax(sim_map, dim=-1)
 
-        return (group_weights[:, 0].view(-1, 1, 1) * fused_sem +
-                group_weights[:, 1].view(-1, 1, 1) * fused_vis +
-                group_weights[:, 2].view(-1, 1, 1) * fused_ctx)
+        lang = torch.matmul(sim_map, value.permute(0, 1, 3, 2))
+        lang = lang.permute(0, 2, 1, 3).contiguous().reshape(B, HW, self.value_channels)
+        anomaly_response = self.anomaly_score(x)
+        lang = lang * anomaly_response
+        lang = self.lang_out(lang.permute(0, 2, 1).contiguous())
+
+        mm = torch.mul(vis, lang)
+        mm = self.project_mm(mm)
+        return mm.permute(0, 2, 1).contiguous()
+
+
+class HAPWAM(SPAM):
+    """Compatibility alias: hapwam configuration now uses the SPAM implementation."""
+    pass
 
 
 class SpatialImageLanguageAttention(nn.Module):

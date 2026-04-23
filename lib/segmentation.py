@@ -13,7 +13,7 @@ def _resolve_module_args(args):
     hlg_stages = tuple(getattr(args, 'hlg_stages', [3]))
 
     if gate_module in ('lg', 'hlg') and align_module == 'none':
-        raise ValueError('gate_module={} requires align_module to be one of plain/pwam/hapwam'.format(gate_module))
+        raise ValueError('gate_module={} requires align_module to be one of plain/pwam/spam/hapwam'.format(gate_module))
     if gate_module == 'hlg':
         invalid_hlg_stages = [stage for stage in hlg_stages if stage not in (3, 4)]
         if invalid_hlg_stages:
@@ -64,7 +64,7 @@ def _segm_lavt(pretrained, args):
     if args.mha:
         mha = args.mha.split('-')  # if non-empty, then ['a', 'b', 'c', 'd']
         mha = [int(a) for a in mha]
-    elif module_args['align_module'] == 'hapwam':
+    elif module_args['align_module'] in ('spam', 'hapwam'):
         mha = [1, 1, 4, 8]
     else:
         mha = [1, 1, 1, 1]
@@ -145,7 +145,7 @@ def _segm_lavt_one(pretrained, args):
     if args.mha:
         mha = args.mha.split('-')  # if non-empty, then ['a', 'b', 'c', 'd']
         mha = [int(a) for a in mha]
-    elif module_args['align_module'] == 'hapwam':
+    elif module_args['align_module'] in ('spam', 'hapwam'):
         mha = [1, 1, 4, 8]
     else:
         mha = [1, 1, 1, 1]

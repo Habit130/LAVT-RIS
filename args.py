@@ -25,18 +25,18 @@ def get_parser():
     parser.add_argument('--device', default='cuda:0',
                         help='device for testing or single-GPU training')
     parser.add_argument('--epochs', default=40, type=int, metavar='N', help='number of total epochs to run')
-    parser.add_argument('--align_module', default='hapwam', choices=['none', 'plain', 'pwam', 'hapwam'],
-                        help='stage-level language alignment module; plain uses weak masked-mean text pooling with linear projection and additive visual conditioning')
+    parser.add_argument('--align_module', default='spam', choices=['none', 'plain', 'pwam', 'spam', 'hapwam'],
+                        help='stage-level language alignment module; spam is the symptom-guided pixel-word alignment module and hapwam is kept as a compatibility alias')
     parser.add_argument('--fusion_drop', default=0.0, type=float,
-                        help='dropout rate for plain/PWAM/HAPWAM fusion modules')
+                        help='dropout rate for plain/PWAM/SPAM fusion modules')
     parser.add_argument('--gate_module', default='hlg', choices=['none', 'lg', 'hlg'],
                         help='gate module applied after stage-level language alignment')
     parser.add_argument('--hapwam_hidden_dim', default=256, type=int,
-                        help='hidden dimension of the HAPWAM conditioned token router')
+                        help='compatibility alias for the hidden dimension of the SPAM token reweighting branch')
     parser.add_argument('--hapwam_fusion_hidden_dim', default=256, type=int,
-                        help='hidden dimension of the HAPWAM adaptive group fusion MLP')
+                        help='compatibility alias for the hidden dimension of the SPAM anomaly modulation branch')
     parser.add_argument('--hapwam_dropout', default=0.1, type=float,
-                        help='dropout rate shared by the HAPWAM adaptive fusion modules')
+                        help='compatibility alias retained for older SPAM/HAPWAM experiment configs')
     parser.add_argument('--hlg_aux_loss_weight', default=0.05, type=float,
                         help='weight for the summed HLG auxiliary loss')
     parser.add_argument('--hlg_false_healthy_weight', default=0.5, type=float,
@@ -122,7 +122,7 @@ def validate_args(args):
     hlg_stages = tuple(getattr(args, 'hlg_stages', [3]))
 
     if gate_module in ('lg', 'hlg') and align_module == 'none':
-        raise ValueError('gate_module={} requires align_module to be one of plain/pwam/hapwam'.format(gate_module))
+        raise ValueError('gate_module={} requires align_module to be one of plain/pwam/spam/hapwam'.format(gate_module))
 
     if gate_module == 'hlg':
         invalid_hlg_stages = [stage for stage in hlg_stages if stage not in (3, 4)]

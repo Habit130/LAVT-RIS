@@ -12,7 +12,8 @@ import utils
 
 
 def allow_partial_checkpoint_load(args):
-    return getattr(args, 'align_module', 'none') in ('plain', 'hapwam') or getattr(args, 'gate_module', 'none') == 'hlg'
+    return getattr(args, 'align_module', 'none') in ('plain', 'spam', 'hapwam') or \
+        getattr(args, 'gate_module', 'none') == 'hlg'
 
 
 def get_dataset(image_set, transform, args):
