@@ -1,9 +1,7 @@
 import datetime
 import gc
-import operator
 import os
 import time
-from functools import reduce
 
 import torch
 import torch.nn.functional as F
@@ -13,8 +11,7 @@ from torch import nn
 from eval_ris_metrics import evaluate_mask_arrays, format_metrics_summary
 from lib import segmentation
 from text_encoder import (TEXT_ENCODER_MODEL_KEY, build_text_encoder, encode_text,
-                          get_checkpoint_text_encoder_state, get_text_encoder_layers,
-                          prepare_text_encoder_args)
+                          get_checkpoint_text_encoder_state, prepare_text_encoder_args)
 import transforms as T
 import utils
 
@@ -137,6 +134,8 @@ def forward_model(model, text_encoder, image, sentences, attentions, return_aux=
 
 def evaluate(model, data_loader, text_encoder, device, args):
     model.eval()
+    if text_encoder is not None:
+        text_encoder.eval()
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Val:'
     pred_masks = []
@@ -289,26 +288,20 @@ def main(args):
             backbone_decay.append(parameter)
 
     if args.model != 'lavt_one':
-        text_encoder_layers = get_text_encoder_layers(single_text_encoder)
-        num_trainable_text_layers = min(10, len(text_encoder_layers))
+        text_encoder_params = [p for p in single_text_encoder.parameters() if p.requires_grad]
         params_to_optimize = [
             {'params': backbone_no_decay, 'weight_decay': 0.0},
             {'params': backbone_decay},
             {"params": [p for p in single_model.classifier.parameters() if p.requires_grad]},
-            {"params": reduce(operator.concat,
-                              [[p for p in text_encoder_layers[i].parameters()
-                                if p.requires_grad] for i in range(num_trainable_text_layers)])},
+            {"params": text_encoder_params},
         ]
     else:
-        text_encoder_layers = get_text_encoder_layers(single_model.text_encoder)
-        num_trainable_text_layers = min(10, len(text_encoder_layers))
+        text_encoder_params = [p for p in single_model.text_encoder.parameters() if p.requires_grad]
         params_to_optimize = [
             {'params': backbone_no_decay, 'weight_decay': 0.0},
             {'params': backbone_decay},
             {"params": [p for p in single_model.classifier.parameters() if p.requires_grad]},
-            {"params": reduce(operator.concat,
-                              [[p for p in text_encoder_layers[i].parameters()
-                                if p.requires_grad] for i in range(num_trainable_text_layers)])},
+            {"params": text_encoder_params},
         ]
 
     optimizer = torch.optim.AdamW(params_to_optimize,
