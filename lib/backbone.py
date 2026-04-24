@@ -334,22 +334,20 @@ class PatchEmbed(nn.Module):
 class PlainTextFusion(nn.Module):
     def __init__(self, dim, l_in_channels, dropout=0.0):
         super().__init__()
-        self.vis_project = nn.Sequential(
-            nn.Conv1d(dim, dim, 1, 1),
-            nn.GELU(),
-            nn.Dropout(dropout)
-        )
         self.text_project = nn.Linear(l_in_channels, dim)
 
     def forward(self, x, l, l_mask):
-        vis = self.vis_project(x.permute(0, 2, 1)).permute(0, 2, 1).contiguous()
         l_tokens = l.permute(0, 2, 1).contiguous()
-        token_mask = l_mask.to(dtype=l_tokens.dtype)
+        if l_mask.dim() == 2:
+            token_mask = l_mask.unsqueeze(-1)
+        else:
+            token_mask = l_mask
+        token_mask = token_mask.to(device=l_tokens.device, dtype=l_tokens.dtype)
         pooled = (l_tokens * token_mask).sum(dim=1)
         denom = token_mask.sum(dim=1).clamp_min(1.0)
         global_text = pooled / denom
         projected_text = self.text_project(global_text).unsqueeze(1)
-        return vis + projected_text
+        return projected_text.expand(-1, x.size(1), -1).contiguous()
 
 
 class HealthySuppressedLanguageGate(nn.Module):
