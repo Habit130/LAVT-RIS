@@ -3,6 +3,29 @@ import argparse
 from text_encoder import DEFAULT_MAX_TEXT_TOKENS, DEFAULT_TEXT_ENCODER_NAME
 
 
+ABLATION_CONFIGS = {
+    'base': ('plain', 'none', [3, 4]),
+    'spam_only': ('spam', 'none', [3, 4]),
+    'hlg_only': ('plain', 'hlg', [3, 4]),
+    'ours': ('spam', 'hlg', [3, 4]),
+    'lavt_style_baseline': ('pwam', 'lg', [3, 4]),
+}
+
+
+def apply_ablation_config(args):
+    ablation_config = getattr(args, 'ablation_config', '')
+    if not ablation_config:
+        return args
+
+    align_module, gate_module, hlg_stages = ABLATION_CONFIGS[ablation_config]
+    args.align_module = align_module
+    args.gate_module = gate_module
+    args.hlg_stages = list(hlg_stages)
+    print('Resolved ablation_config [{}] to align_module={}, gate_module={}, hlg_stages={}'.format(
+        ablation_config, args.align_module, args.gate_module, args.hlg_stages))
+    return args
+
+
 def get_parser():
     parser = argparse.ArgumentParser(description='LAVT training and testing')
     parser.add_argument('--amsgrad', action='store_true',
@@ -25,12 +48,15 @@ def get_parser():
     parser.add_argument('--device', default='cuda:0',
                         help='device for testing or single-GPU training')
     parser.add_argument('--epochs', default=40, type=int, metavar='N', help='number of total epochs to run')
+    parser.add_argument('--ablation_config', default='base',
+                        choices=[''] + sorted(ABLATION_CONFIGS.keys()),
+                        help='clean RIS ablation preset; pass an empty string to use raw align/gate switches directly')
     parser.add_argument('--align_module', default='spam', choices=['none', 'plain', 'pwam', 'spam', 'hapwam'],
-                        help='stage-level language alignment module; spam is the symptom-guided pixel-word alignment module and hapwam is kept as a compatibility alias')
+                        help='raw stage-level language alignment module; final ablations should use --ablation_config')
     parser.add_argument('--fusion_drop', default=0.0, type=float,
                         help='dropout rate for plain/PWAM/SPAM fusion modules')
     parser.add_argument('--gate_module', default='hlg', choices=['none', 'lg', 'hlg'],
-                        help='gate module applied after stage-level language alignment')
+                        help='raw gate module after alignment; lg is the legacy res_gate path')
     parser.add_argument('--hapwam_hidden_dim', default=256, type=int,
                         help='compatibility alias for the hidden dimension of the SPAM token reweighting branch')
     parser.add_argument('--hapwam_fusion_hidden_dim', default=256, type=int,
@@ -43,8 +69,8 @@ def get_parser():
                         help='weight for false-healthy suppression inside each HLG stage loss')
     parser.add_argument('--hlg_hidden_channels', default=None, type=int,
                         help='hidden channels for HLG; defaults to the stage channel dimension when omitted')
-    parser.add_argument('--hlg_stages', default=[3], nargs='+', type=int,
-                        help='1-based stage ids that use HLG when gate_module=hlg; defaults to stage 3 only and only stages 3 and 4 are supported')
+    parser.add_argument('--hlg_stages', default=[3, 4], nargs='+', type=int,
+                        help='1-based stage ids that use HLG when gate_module=hlg; defaults to stages 3 and 4')
     parser.add_argument('--img_size', default=480, type=int, help='input image size')
     parser.add_argument("--local_rank", default=-1, type=int, help='local rank for DistributedDataParallel')
     parser.add_argument('--lr', default=0.00005, type=float, help='the initial learning rate')
@@ -85,6 +111,8 @@ def get_parser():
 
 
 def validate_args(args):
+    args = apply_ablation_config(args)
+
     if args.ck_bert:
         if args.text_encoder_name == DEFAULT_TEXT_ENCODER_NAME:
             print('Deprecated argument --ck_bert detected; mapping it to --text_encoder_name.')
@@ -119,7 +147,7 @@ def validate_args(args):
 
     align_module = getattr(args, 'align_module', 'none')
     gate_module = getattr(args, 'gate_module', 'none')
-    hlg_stages = tuple(getattr(args, 'hlg_stages', [3]))
+    hlg_stages = tuple(getattr(args, 'hlg_stages', [3, 4]))
 
     if gate_module in ('lg', 'hlg') and align_module == 'none':
         raise ValueError('gate_module={} requires align_module to be one of plain/pwam/spam/hapwam'.format(gate_module))

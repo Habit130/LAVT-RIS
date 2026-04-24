@@ -403,7 +403,7 @@ class MultiModalSwinTransformer(nn.Module):
                  hapwam_fusion_hidden_dim=256,
                  hapwam_dropout=0.1,
                  hlg_hidden_channels=None,
-                 hlg_stages=(3,)
+                 hlg_stages=(3, 4)
                  ):
         super().__init__()
 
@@ -592,7 +592,7 @@ class MMBasicLayer(nn.Module):
                  hapwam_hidden_dim=256,
                  hapwam_fusion_hidden_dim=256,
                  hlg_hidden_channels=None,
-                 hlg_stages=(3,)
+                 hlg_stages=(3, 4)
                  ):
         super().__init__()
         self.window_size = window_size
@@ -690,7 +690,6 @@ class MMBasicLayer(nn.Module):
             raise RuntimeError('Aligned feature shape {} does not match visual feature shape {}'.format(
                 tuple(aligned_feature.shape), tuple(visual_feature.shape)))
 
-        layer_output = aligned_feature if aligned_feature is not None else visual_feature
         layer_aux = {}
 
         if self.gate_module == 'none' or aligned_feature is None:
@@ -712,6 +711,8 @@ class MMBasicLayer(nn.Module):
                 updated_feature = visual_feature + aligned_feature
         else:
             raise ValueError('Unsupported gate_module: {}'.format(self.gate_module))
+
+        layer_output = updated_feature
 
         if self.downsample is not None:
             x_down = self.downsample(updated_feature, H, W)
