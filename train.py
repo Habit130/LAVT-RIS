@@ -1,5 +1,6 @@
 import datetime
 import gc
+import json
 import os
 import time
 
@@ -14,6 +15,66 @@ from text_encoder import (TEXT_ENCODER_MODEL_KEY, build_text_encoder, encode_tex
                           get_checkpoint_text_encoder_state, prepare_text_encoder_args)
 import transforms as T
 import utils
+
+
+CHECKPOINT_CONFIG_KEY = 'checkpoint_config'
+CHECKPOINT_CONFIG_FIELDS = (
+    'ablation_config',
+    'align_module',
+    'gate_module',
+    'hlg_stages',
+    'swin_type',
+    'model',
+    'dataset',
+    'text_encoder_name',
+    'max_text_tokens',
+    'plantseg_caption_index',
+    'img_size',
+)
+
+
+def collect_checkpoint_config(args):
+    config = {}
+    for field in CHECKPOINT_CONFIG_FIELDS:
+        value = getattr(args, field)
+        if field == 'hlg_stages':
+            value = [int(item) for item in value]
+        config[field] = value
+    return config
+
+
+def validate_checkpoint_config(checkpoint, args, checkpoint_path, context):
+    current_config = collect_checkpoint_config(args)
+    print('{} checkpoint path: {}'.format(context, checkpoint_path))
+    print('{} strict load enabled: True'.format(context))
+    print('{} current args config: {}'.format(context, json.dumps(current_config, sort_keys=True)))
+
+    if CHECKPOINT_CONFIG_KEY not in checkpoint:
+        raise ValueError(
+            '{} checkpoint [{}] is missing [{}]; it cannot be used for strict {}. '
+            'Use a new-format checkpoint or convert it after manually confirming the config.'
+            .format(context, checkpoint_path, CHECKPOINT_CONFIG_KEY, context.lower())
+        )
+
+    loaded_config = checkpoint[CHECKPOINT_CONFIG_KEY]
+    print('{} loaded checkpoint config: {}'.format(context, json.dumps(loaded_config, sort_keys=True)))
+
+    mismatches = []
+    for field in CHECKPOINT_CONFIG_FIELDS:
+        loaded_value = loaded_config.get(field)
+        current_value = current_config[field]
+        if loaded_value != current_value:
+            mismatches.append((field, loaded_value, current_value))
+
+    if mismatches:
+        details = '; '.join(
+            '{}: checkpoint={!r}, current={!r}'.format(field, loaded_value, current_value)
+            for field, loaded_value, current_value in mismatches
+        )
+        print('{} config match result: mismatch'.format(context))
+        raise ValueError('{} checkpoint config mismatch: {}'.format(context, details))
+
+    print('{} config match result: match'.format(context))
 
 
 def get_dataset(image_set, transform, args):
@@ -116,11 +177,6 @@ def compute_gate_losses(aux_outputs, disease_mask, false_healthy_mask, has_false
 
 def should_return_aux(args):
     return getattr(args, 'gate_module', 'none') == 'hlg'
-
-
-def allow_partial_checkpoint_load(args):
-    return getattr(args, 'align_module', 'none') in ('plain', 'spam', 'hapwam') or \
-        getattr(args, 'gate_module', 'none') == 'hlg'
 
 
 def forward_model(model, text_encoder, image, sentences, attentions, return_aux=False):
@@ -263,11 +319,14 @@ def main(args):
 
     if args.resume:
         checkpoint = torch.load(args.resume, map_location='cpu')
+        validate_checkpoint_config(checkpoint, args, args.resume, context='Resume')
         utils.load_state_dict_with_fallback(single_model,
                                             checkpoint['model'],
-                                            strict=not allow_partial_checkpoint_load(args),
+                                            strict=True,
                                             description='model')
         text_encoder_state, text_encoder_key = get_checkpoint_text_encoder_state(checkpoint, args)
+        if args.model != 'lavt_one' and text_encoder_state is None:
+            raise KeyError('Resume checkpoint [{}] is missing text encoder weights.'.format(args.resume))
         if args.model != 'lavt_one' and text_encoder_state is not None:
             utils.load_state_dict_with_fallback(single_text_encoder,
                                                 text_encoder_state,
@@ -317,15 +376,9 @@ def main(args):
 
     resume_epoch = -999
     if args.resume:
-        try:
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-            resume_epoch = checkpoint['epoch']
-        except (ValueError, RuntimeError) as exc:
-            if allow_partial_checkpoint_load(args):
-                print('Skipping optimizer/lr_scheduler resume because checkpoint is partially compatible: {}'.format(exc))
-            else:
-                raise
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+        resume_epoch = checkpoint['epoch']
 
     for epoch in range(max(0, resume_epoch + 1), args.epochs):
         if args.distributed:
@@ -345,6 +398,7 @@ def main(args):
                     'optimizer': optimizer.state_dict(),
                     'epoch': epoch,
                     'args': args,
+                    CHECKPOINT_CONFIG_KEY: collect_checkpoint_config(args),
                     'lr_scheduler': lr_scheduler.state_dict()
                 }
             else:
@@ -354,6 +408,7 @@ def main(args):
                     'optimizer': optimizer.state_dict(),
                     'epoch': epoch,
                     'args': args,
+                    CHECKPOINT_CONFIG_KEY: collect_checkpoint_config(args),
                     'lr_scheduler': lr_scheduler.state_dict()
                 }
 

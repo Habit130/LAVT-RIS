@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import torch
@@ -11,9 +12,64 @@ import transforms as T
 import utils
 
 
-def allow_partial_checkpoint_load(args):
-    return getattr(args, 'align_module', 'none') in ('plain', 'spam', 'hapwam') or \
-        getattr(args, 'gate_module', 'none') == 'hlg'
+CHECKPOINT_CONFIG_KEY = 'checkpoint_config'
+CHECKPOINT_CONFIG_FIELDS = (
+    'ablation_config',
+    'align_module',
+    'gate_module',
+    'hlg_stages',
+    'swin_type',
+    'model',
+    'dataset',
+    'text_encoder_name',
+    'max_text_tokens',
+    'plantseg_caption_index',
+    'img_size',
+)
+
+
+def collect_checkpoint_config(args):
+    config = {}
+    for field in CHECKPOINT_CONFIG_FIELDS:
+        value = getattr(args, field)
+        if field == 'hlg_stages':
+            value = [int(item) for item in value]
+        config[field] = value
+    return config
+
+
+def validate_checkpoint_config(checkpoint, args, checkpoint_path, context):
+    current_config = collect_checkpoint_config(args)
+    print('{} checkpoint path: {}'.format(context, checkpoint_path))
+    print('{} strict load enabled: True'.format(context))
+    print('{} current args config: {}'.format(context, json.dumps(current_config, sort_keys=True)))
+
+    if CHECKPOINT_CONFIG_KEY not in checkpoint:
+        raise ValueError(
+            '{} checkpoint [{}] is missing [{}]; use a new-format checkpoint or convert it after '
+            'manually confirming the config.'
+            .format(context, checkpoint_path, CHECKPOINT_CONFIG_KEY)
+        )
+
+    loaded_config = checkpoint[CHECKPOINT_CONFIG_KEY]
+    print('{} loaded checkpoint config: {}'.format(context, json.dumps(loaded_config, sort_keys=True)))
+
+    mismatches = []
+    for field in CHECKPOINT_CONFIG_FIELDS:
+        loaded_value = loaded_config.get(field)
+        current_value = current_config[field]
+        if loaded_value != current_value:
+            mismatches.append((field, loaded_value, current_value))
+
+    if mismatches:
+        details = '; '.join(
+            '{}: checkpoint={!r}, current={!r}'.format(field, loaded_value, current_value)
+            for field, loaded_value, current_value in mismatches
+        )
+        print('{} config match result: mismatch'.format(context))
+        raise ValueError('{} checkpoint config mismatch: {}'.format(context, details))
+
+    print('{} config match result: match'.format(context))
 
 
 def get_dataset(image_set, transform, args):
@@ -119,15 +175,18 @@ def main(args):
     print(args.model)
     single_model = segmentation.__dict__[args.model](pretrained='', args=args)
     checkpoint = torch.load(args.resume, map_location='cpu')
+    validate_checkpoint_config(checkpoint, args, args.resume, context='Test')
     utils.load_state_dict_with_fallback(single_model,
                                         checkpoint['model'],
-                                        strict=not allow_partial_checkpoint_load(args),
+                                        strict=True,
                                         description='model')
     model = single_model.to(device)
 
     if args.model != 'lavt_one':
         single_text_encoder = build_text_encoder(args, config=text_encoder_config)
         text_encoder_state, text_encoder_key = get_checkpoint_text_encoder_state(checkpoint, args)
+        if text_encoder_state is None:
+            raise KeyError('Test checkpoint [{}] is missing text encoder weights.'.format(args.resume))
         if text_encoder_state is not None:
             utils.load_state_dict_with_fallback(single_text_encoder,
                                                 text_encoder_state,
