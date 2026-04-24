@@ -2,9 +2,12 @@ import datetime
 import gc
 import json
 import os
+import random
 import time
 
+import numpy as np
 import torch
+import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
 import torch.utils.data
 from torch import nn
@@ -31,6 +34,24 @@ CHECKPOINT_CONFIG_FIELDS = (
     'plantseg_caption_index',
     'img_size',
 )
+
+
+def setup_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    cudnn.deterministic = True
+    cudnn.benchmark = False
+    print('Seed: {}'.format(seed))
+    print('cudnn.deterministic: {}'.format(cudnn.deterministic))
+    print('cudnn.benchmark: {}'.format(cudnn.benchmark))
+
+
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2 ** 32
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
 
 
 def collect_checkpoint_config(args):
@@ -276,6 +297,10 @@ def train_one_epoch(model, criterion_fn, optimizer, data_loader, lr_scheduler, e
 def main(args):
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     text_encoder_config = prepare_text_encoder_args(args)
+    train_generator = torch.Generator()
+    train_generator.manual_seed(args.seed)
+    val_generator = torch.Generator()
+    val_generator.manual_seed(args.seed)
 
     dataset, _ = get_dataset("train", get_transform(args=args), args=args)
     dataset_val, _ = get_dataset("val", get_transform(args=args), args=args)
@@ -286,16 +311,17 @@ def main(args):
         num_tasks = utils.get_world_size()
         global_rank = utils.get_rank()
         train_sampler = torch.utils.data.distributed.DistributedSampler(
-            dataset, num_replicas=num_tasks, rank=global_rank, shuffle=True)
+            dataset, num_replicas=num_tasks, rank=global_rank, shuffle=True, seed=args.seed)
     else:
-        train_sampler = torch.utils.data.RandomSampler(dataset)
+        train_sampler = torch.utils.data.RandomSampler(dataset, generator=train_generator)
     val_sampler = torch.utils.data.SequentialSampler(dataset_val)
 
     data_loader = torch.utils.data.DataLoader(
         dataset, batch_size=args.batch_size, sampler=train_sampler, num_workers=args.workers,
-        pin_memory=args.pin_mem, drop_last=True)
+        pin_memory=args.pin_mem, drop_last=True, worker_init_fn=seed_worker, generator=train_generator)
     data_loader_val = torch.utils.data.DataLoader(
-        dataset_val, batch_size=1, sampler=val_sampler, num_workers=args.workers)
+        dataset_val, batch_size=1, sampler=val_sampler, num_workers=args.workers,
+        worker_init_fn=seed_worker, generator=val_generator)
 
     print(args.model)
     model = segmentation.__dict__[args.model](pretrained=args.pretrained_swin_weights, args=args)
@@ -427,5 +453,6 @@ if __name__ == "__main__":
     parser = get_parser()
     args = validate_args(parser.parse_args())
     utils.init_distributed_mode(args)
+    setup_seed(args.seed)
     print('Image size: {}'.format(str(args.img_size)))
     main(args)

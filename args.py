@@ -95,6 +95,7 @@ def get_parser():
                         help='directory for saving predicted masks during testing; testing metrics are computed separately via eval_ris_metrics.py')
     parser.add_argument('--save_mask_dir', default='',
                         help='deprecated alias of --save_pred_dir')
+    parser.add_argument('--seed', default=42, type=int, help='random seed for reproducible training')
     parser.add_argument('--split', default='test', help='only used when testing')
     parser.add_argument('--splitBy', default='unc', help='change to umd or google when the dataset is G-Ref (RefCOCOg)')
     parser.add_argument('--swin_type', default='base',
