@@ -98,8 +98,8 @@ def compute_gate_losses(aux_outputs, disease_mask, false_healthy_mask, has_false
         per_pixel_dis = (gate_map - pos_target) ** 2
         loss_dis_i = (per_pixel_dis * disease_pos).sum() / (disease_pos.sum() + 1e-6)
 
-        neg_target = -torch.ones_like(gate_map)
-        per_pixel_fh = (gate_map - neg_target) ** 2
+        false_healthy_target = torch.zeros_like(gate_map)
+        per_pixel_fh = (gate_map - false_healthy_target) ** 2
         valid_false_pos = false_pos * sample_valid
         loss_fh_i = (per_pixel_fh * valid_false_pos).sum() / (valid_false_pos.sum() + 1e-6)
 

@@ -63,9 +63,9 @@ def get_parser():
                         help='compatibility alias for the hidden dimension of the SPAM anomaly modulation branch')
     parser.add_argument('--hapwam_dropout', default=0.1, type=float,
                         help='compatibility alias retained for older SPAM/HAPWAM experiment configs')
-    parser.add_argument('--hlg_aux_loss_weight', default=0.05, type=float,
+    parser.add_argument('--hlg_aux_loss_weight', default=0.01, type=float,
                         help='weight for the summed HLG auxiliary loss')
-    parser.add_argument('--hlg_false_healthy_weight', default=0.5, type=float,
+    parser.add_argument('--hlg_false_healthy_weight', default=0.25, type=float,
                         help='weight for false-healthy suppression inside each HLG stage loss')
     parser.add_argument('--hlg_hidden_channels', default=None, type=int,
                         help='hidden channels for HLG; defaults to the stage channel dimension when omitted')
