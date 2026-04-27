@@ -403,7 +403,8 @@ def main(args):
 
     start_time = time.time()
     iterations = 0
-    best_score = -1.0
+    best_oiou = -1.0
+    best_miou = -1.0
 
     resume_epoch = -999
     if args.resume:
@@ -418,10 +419,10 @@ def main(args):
         train_one_epoch(model, criterion, optimizer, data_loader, lr_scheduler, epoch,
                         args.print_freq, iterations, text_encoder, device, args)
         validation_result = evaluate(model, data_loader_val, text_encoder, device, args)
-        current_score = validation_result['oIoU']
+        current_oiou = validation_result['oIoU']
+        current_miou = validation_result['mIoU']
 
-        if best_score < current_score:
-            print('Better epoch: {}\n'.format(epoch))
+        if best_oiou < current_oiou or best_miou < current_miou:
             if args.model != 'lavt_one':
                 dict_to_save = {
                     'model': single_model.state_dict(),
@@ -443,9 +444,17 @@ def main(args):
                     'lr_scheduler': lr_scheduler.state_dict()
                 }
 
+        if best_oiou < current_oiou:
+            print('Better oIoU epoch: {}\n'.format(epoch))
             utils.save_on_master(dict_to_save, os.path.join(args.output_dir,
-                                                            'model_best_{}.pth'.format(args.model_id)))
-            best_score = current_score
+                                                            'model_best_oiou_{}.pth'.format(args.model_id)))
+            best_oiou = current_oiou
+
+        if best_miou < current_miou:
+            print('Better mIoU epoch: {}\n'.format(epoch))
+            utils.save_on_master(dict_to_save, os.path.join(args.output_dir,
+                                                            'model_best_miou_{}.pth'.format(args.model_id)))
+            best_miou = current_miou
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
