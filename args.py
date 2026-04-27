@@ -5,9 +5,11 @@ from text_encoder import DEFAULT_MAX_TEXT_TOKENS, DEFAULT_TEXT_ENCODER_NAME
 
 ABLATION_CONFIGS = {
     'base': ('plain', 'none', [3, 4]),
+    'base_no_fusion': ('none', 'none', []),
     'spam_only': ('spam', 'none', [3, 4]),
     'hlg_only': ('plain', 'hlg', [3, 4]),
     'ours': ('spam', 'hlg', [3, 4]),
+    'ours_hlg_s4': ('spam', 'hlg', [4]),
     'lavt_style_baseline': ('pwam', 'lg', [3, 4]),
 }
 
