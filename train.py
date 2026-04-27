@@ -33,6 +33,9 @@ CHECKPOINT_CONFIG_FIELDS = (
     'max_text_tokens',
     'plantseg_caption_index',
     'img_size',
+    'hlg_suppression_alpha',
+    'hlg_disease_suppress_weight',
+    'hlg_false_healthy_weight',
 )
 
 
@@ -138,7 +141,8 @@ def unpack_batch(data):
     return image, target, sentences, attentions, false_healthy_mask, has_false_healthy
 
 
-def compute_gate_losses(aux_outputs, disease_mask, false_healthy_mask, has_false_healthy, false_healthy_weight):
+def compute_gate_losses(aux_outputs, disease_mask, false_healthy_mask, has_false_healthy,
+                        disease_suppress_weight, false_healthy_weight):
     zero = torch.zeros((), device=disease_mask.device, dtype=torch.float32)
     if not aux_outputs or false_healthy_mask is None or has_false_healthy is None:
         return {
@@ -166,26 +170,26 @@ def compute_gate_losses(aux_outputs, disease_mask, false_healthy_mask, has_false
         if gate_tensor is None:
             continue
 
-        gate_map = gate_tensor.mean(dim=1, keepdim=True)
-        disease_i = F.interpolate(disease_mask, size=gate_map.shape[-2:], mode='nearest')
-        false_healthy_i = F.interpolate(false_healthy_mask, size=gate_map.shape[-2:], mode='nearest')
+        suppress_map = gate_tensor.mean(dim=1, keepdim=True)
+        disease_i = F.interpolate(disease_mask, size=suppress_map.shape[-2:], mode='nearest')
+        false_healthy_i = F.interpolate(false_healthy_mask, size=suppress_map.shape[-2:], mode='nearest')
 
         disease_pos = (disease_i > 0.5).float()
         false_pos = (false_healthy_i > 0.5).float()
 
-        pos_target = torch.ones_like(gate_map)
-        per_pixel_dis = (gate_map - pos_target) ** 2
+        disease_target = torch.zeros_like(suppress_map)
+        per_pixel_dis = (suppress_map - disease_target) ** 2
         loss_dis_i = (per_pixel_dis * disease_pos).sum() / (disease_pos.sum() + 1e-6)
 
-        false_healthy_target = torch.zeros_like(gate_map)
-        per_pixel_fh = (gate_map - false_healthy_target) ** 2
+        false_healthy_target = torch.ones_like(suppress_map)
+        per_pixel_fh = (suppress_map - false_healthy_target) ** 2
         valid_false_pos = false_pos * sample_valid
         loss_fh_i = (per_pixel_fh * valid_false_pos).sum() / (valid_false_pos.sum() + 1e-6)
 
-        gate_loss = gate_loss + loss_dis_i + false_healthy_weight * loss_fh_i
+        gate_loss = gate_loss + disease_suppress_weight * loss_dis_i + false_healthy_weight * loss_fh_i
         gate_disease_loss = gate_disease_loss + loss_dis_i
         gate_false_healthy_loss = gate_false_healthy_loss + loss_fh_i
-        stage_means[f'gate_{stage_name.split("_")[-1]}_mean'] = gate_map.mean().detach()
+        stage_means[f'gate_{stage_name.split("_")[-1]}_mean'] = suppress_map.mean().detach()
 
     return {
         'gate_loss': gate_loss,
@@ -265,6 +269,7 @@ def train_one_epoch(model, criterion_fn, optimizer, data_loader, lr_scheduler, e
             aux_outputs = {}
         seg_loss = criterion_fn(output, target)
         gate_losses = compute_gate_losses(aux_outputs, target, false_healthy_mask, has_false_healthy,
+                                          args.hlg_disease_suppress_weight,
                                           args.hlg_false_healthy_weight)
         loss = seg_loss + args.hlg_aux_loss_weight * gate_losses['gate_loss']
 

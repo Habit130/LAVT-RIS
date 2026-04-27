@@ -359,7 +359,7 @@ class HealthySuppressedLanguageGate(nn.Module):
         self.conv2 = nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1, bias=True)
         self.act2 = nn.ReLU(inplace=True)
         self.conv3 = nn.Conv2d(hidden_channels, channels, kernel_size=1, bias=True)
-        self.out = nn.Tanh()
+        self.out = nn.Sigmoid()
 
     def forward(self, visual_feature, fused_feature):
         gate_input = torch.cat([visual_feature, fused_feature], dim=1)
@@ -401,6 +401,7 @@ class MultiModalSwinTransformer(nn.Module):
                  hapwam_fusion_hidden_dim=256,
                  hapwam_dropout=0.1,
                  hlg_hidden_channels=None,
+                 hlg_suppression_alpha=0.5,
                  hlg_stages=(3, 4)
                  ):
         super().__init__()
@@ -470,6 +471,7 @@ class MultiModalSwinTransformer(nn.Module):
                 hapwam_hidden_dim=hapwam_hidden_dim,
                 hapwam_fusion_hidden_dim=hapwam_fusion_hidden_dim,
                 hlg_hidden_channels=hlg_hidden_channels,
+                hlg_suppression_alpha=hlg_suppression_alpha,
                 hlg_stages=self.hlg_stage_ids
             )
             self.layers.append(layer)
@@ -590,6 +592,7 @@ class MMBasicLayer(nn.Module):
                  hapwam_hidden_dim=256,
                  hapwam_fusion_hidden_dim=256,
                  hlg_hidden_channels=None,
+                 hlg_suppression_alpha=0.5,
                  hlg_stages=(3, 4)
                  ):
         super().__init__()
@@ -602,6 +605,7 @@ class MMBasicLayer(nn.Module):
         self.gate_module = gate_module
         self.stage_id = stage_id
         self.hlg_stages = set(hlg_stages or [])
+        self.hlg_suppression_alpha = hlg_suppression_alpha
 
         # build blocks
         self.blocks = nn.ModuleList([
@@ -698,13 +702,14 @@ class MMBasicLayer(nn.Module):
             if self.stage_id in self.hlg_stages:
                 visual_2d = visual_feature.transpose(1, 2).reshape(visual_feature.shape[0], self.dim, H, W).contiguous()
                 aligned_2d = aligned_feature.transpose(1, 2).reshape(aligned_feature.shape[0], self.dim, H, W).contiguous()
-                gate_map = self.hlg(visual_2d, aligned_2d)
-                if gate_map.shape != visual_2d.shape:
-                    raise RuntimeError('HLG gate shape {} does not match visual feature shape {}'.format(
-                        tuple(gate_map.shape), tuple(visual_2d.shape)))
-                gate = gate_map.flatten(2).transpose(1, 2).contiguous()
-                updated_feature = visual_feature + (gate * aligned_feature)
-                layer_aux['hlg_stage{}'.format(self.stage_id)] = gate_map
+                suppression_map = self.hlg(visual_2d, aligned_2d)
+                if suppression_map.shape != visual_2d.shape:
+                    raise RuntimeError('HLG suppression shape {} does not match visual feature shape {}'.format(
+                        tuple(suppression_map.shape), tuple(visual_2d.shape)))
+                suppression = suppression_map.flatten(2).transpose(1, 2).contiguous()
+                gated_feature = (1.0 - self.hlg_suppression_alpha * suppression) * aligned_feature
+                updated_feature = visual_feature + gated_feature
+                layer_aux['hlg_stage{}'.format(self.stage_id)] = suppression_map
             else:
                 updated_feature = visual_feature + aligned_feature
         else:

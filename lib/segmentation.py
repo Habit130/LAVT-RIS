@@ -27,6 +27,7 @@ def _resolve_module_args(args):
         'hapwam_fusion_hidden_dim': getattr(args, 'hapwam_fusion_hidden_dim', 256),
         'hapwam_dropout': getattr(args, 'hapwam_dropout', 0.1),
         'hlg_hidden_channels': getattr(args, 'hlg_hidden_channels', None),
+        'hlg_suppression_alpha': getattr(args, 'hlg_suppression_alpha', 0.5),
         'hlg_stages': hlg_stages,
     }
 
@@ -83,6 +84,7 @@ def _segm_lavt(pretrained, args):
                                          hapwam_fusion_hidden_dim=module_args['hapwam_fusion_hidden_dim'],
                                          hapwam_dropout=module_args['hapwam_dropout'],
                                          hlg_hidden_channels=module_args['hlg_hidden_channels'],
+                                         hlg_suppression_alpha=module_args['hlg_suppression_alpha'],
                                          hlg_stages=module_args['hlg_stages']
                                          )
     if pretrained:
@@ -164,6 +166,7 @@ def _segm_lavt_one(pretrained, args):
                                          hapwam_fusion_hidden_dim=module_args['hapwam_fusion_hidden_dim'],
                                          hapwam_dropout=module_args['hapwam_dropout'],
                                          hlg_hidden_channels=module_args['hlg_hidden_channels'],
+                                         hlg_suppression_alpha=module_args['hlg_suppression_alpha'],
                                          hlg_stages=module_args['hlg_stages']
                                          )
     if pretrained:

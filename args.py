@@ -67,12 +67,16 @@ def get_parser():
                         help='compatibility alias retained for older SPAM/HAPWAM experiment configs')
     parser.add_argument('--hlg_aux_loss_weight', default=0.01, type=float,
                         help='weight for the summed HLG auxiliary loss')
+    parser.add_argument('--hlg_disease_suppress_weight', default=0.1, type=float,
+                        help='weight for disease non-suppression inside each HLG stage loss')
     parser.add_argument('--hlg_false_healthy_weight', default=0.25, type=float,
                         help='weight for false-healthy suppression inside each HLG stage loss')
     parser.add_argument('--hlg_hidden_channels', default=None, type=int,
                         help='hidden channels for HLG; defaults to the stage channel dimension when omitted')
     parser.add_argument('--hlg_stages', default=[3, 4], nargs='+', type=int,
                         help='1-based stage ids that use HLG when gate_module=hlg; defaults to stages 3 and 4')
+    parser.add_argument('--hlg_suppression_alpha', default=0.5, type=float,
+                        help='fixed suppression strength for HLG suppression maps')
     parser.add_argument('--img_size', default=480, type=int, help='input image size')
     parser.add_argument("--local_rank", default=-1, type=int, help='local rank for DistributedDataParallel')
     parser.add_argument('--lr', default=0.00005, type=float, help='the initial learning rate')
@@ -147,6 +151,12 @@ def validate_args(args):
         raise ValueError('--hapwam_hidden_dim must be >= 1')
     if args.hapwam_fusion_hidden_dim < 1:
         raise ValueError('--hapwam_fusion_hidden_dim must be >= 1')
+    if not 0.0 <= args.hlg_suppression_alpha <= 1.0:
+        raise ValueError('--hlg_suppression_alpha must be within [0, 1]')
+    if args.hlg_disease_suppress_weight < 0.0:
+        raise ValueError('--hlg_disease_suppress_weight must be >= 0')
+    if args.hlg_false_healthy_weight < 0.0:
+        raise ValueError('--hlg_false_healthy_weight must be >= 0')
 
     align_module = getattr(args, 'align_module', 'none')
     gate_module = getattr(args, 'gate_module', 'none')

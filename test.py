@@ -25,6 +25,9 @@ CHECKPOINT_CONFIG_FIELDS = (
     'max_text_tokens',
     'plantseg_caption_index',
     'img_size',
+    'hlg_suppression_alpha',
+    'hlg_disease_suppress_weight',
+    'hlg_false_healthy_weight',
 )
 
 
