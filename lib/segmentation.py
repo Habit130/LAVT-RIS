@@ -15,9 +15,9 @@ def _resolve_module_args(args):
     if gate_module in ('lg', 'hlg') and align_module == 'none':
         raise ValueError('gate_module={} requires align_module to be one of plain/pwam/spam/hapwam'.format(gate_module))
     if gate_module == 'hlg':
-        invalid_hlg_stages = [stage for stage in hlg_stages if stage not in (3, 4)]
+        invalid_hlg_stages = [stage for stage in hlg_stages if stage not in (1, 2, 3, 4)]
         if invalid_hlg_stages:
-            raise ValueError('gate_module=hlg only supports stages 3 and 4, got {}'.format(invalid_hlg_stages))
+            raise ValueError('gate_module=hlg only supports stages 1, 2, 3, and 4, got {}'.format(invalid_hlg_stages))
 
     return {
         'align_module': align_module,

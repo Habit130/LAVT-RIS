@@ -149,6 +149,8 @@ def compute_gate_losses(aux_outputs, disease_mask, false_healthy_mask, has_false
             'gate_loss': zero,
             'gate_disease_loss': zero,
             'gate_false_healthy_loss': zero,
+            'gate_stage1_mean': zero,
+            'gate_stage2_mean': zero,
             'gate_stage3_mean': zero,
             'gate_stage4_mean': zero,
         }
@@ -161,11 +163,13 @@ def compute_gate_losses(aux_outputs, disease_mask, false_healthy_mask, has_false
     gate_disease_loss = zero
     gate_false_healthy_loss = zero
     stage_means = {
+        'gate_stage1_mean': zero,
+        'gate_stage2_mean': zero,
         'gate_stage3_mean': zero,
         'gate_stage4_mean': zero,
     }
 
-    for stage_name in ('hlg_stage3', 'hlg_stage4'):
+    for stage_name in ('hlg_stage1', 'hlg_stage2', 'hlg_stage3', 'hlg_stage4'):
         gate_tensor = aux_outputs.get(stage_name)
         if gate_tensor is None:
             continue
@@ -195,6 +199,8 @@ def compute_gate_losses(aux_outputs, disease_mask, false_healthy_mask, has_false
         'gate_loss': gate_loss,
         'gate_disease_loss': gate_disease_loss,
         'gate_false_healthy_loss': gate_false_healthy_loss,
+        'gate_stage1_mean': stage_means['gate_stage1_mean'],
+        'gate_stage2_mean': stage_means['gate_stage2_mean'],
         'gate_stage3_mean': stage_means['gate_stage3_mean'],
         'gate_stage4_mean': stage_means['gate_stage4_mean'],
     }
@@ -287,6 +293,8 @@ def train_one_epoch(model, criterion_fn, optimizer, data_loader, lr_scheduler, e
                              gate_loss=gate_losses['gate_loss'].item(),
                              gate_disease_loss=gate_losses['gate_disease_loss'].item(),
                              gate_false_healthy_loss=gate_losses['gate_false_healthy_loss'].item(),
+                             gate_stage1_mean=gate_losses['gate_stage1_mean'].item(),
+                             gate_stage2_mean=gate_losses['gate_stage2_mean'].item(),
                              gate_stage3_mean=gate_losses['gate_stage3_mean'].item(),
                              gate_stage4_mean=gate_losses['gate_stage4_mean'].item(),
                              lr=optimizer.param_groups[0]["lr"])

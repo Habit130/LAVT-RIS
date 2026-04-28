@@ -1,0 +1,27 @@
+Create a clean academic vector-style framework diagram for a crop disease referring image segmentation method named PlantSeg-RIS. The diagram shows a language-aware visual encoding framework with two inputs: Image (I) and Referring Expression (T).
+
+Use a horizontal multi-branch architecture layout on a white or very light gray background, suitable for a CVPR/ICCV/NeurIPS Method section overall framework figure. Use clean rounded rectangles, precise arrows, consistent typography, low-saturation colors, and clear module hierarchy. The final image should look like a polished editable vector architecture diagram, not a decorative illustration.
+
+Layout and structure:
+1. Place two inputs on the left: Image (I) in the lower-left visual stream and Referring Expression (T) in the upper-left language stream.
+2. Text branch: Referring Expression (T) -> DeBERTa -> Token-level Language Features (L). Also output Text Valid Mask (M) from the DeBERTa/text-tokenization branch. Draw L and M as shared inputs sent to every HAPWAM block.
+3. Visual branch: Image (I) -> Swin-B -> four hierarchical visual stages: Stage 1 (V_1), Stage 2 (V_2), Stage 3 (V_3), Stage 4 (V_4).
+4. Each stage contains a Hierarchically Adaptive Pixel-Word Alignment Module (HAPWAM). For every stage i, HAPWAM receives V_i, L, and M, and outputs F_i. Inside each HAPWAM, show three compact internal steps: dynamic token routing -> shared pixel-word alignment -> adaptive branch fusion. Represent three latent language groups as three thin parallel branches, but do not name them as semantic, disease, or healthy groups.
+5. Only Stage 3 and Stage 4 contain Healthy-Suppressed Language Gate (HLG). Do not draw HLG in Stage 1 or Stage 2. For Stage 3 and Stage 4, HLG receives V_i and F_i, predicts suppression gate map (G_i), and outputs E_i. Add a small formula label: E_i = V_i + G_i ⊙ F_i.
+6. Stage 1 and Stage 2 should output early language-aware features F_1 and F_2 after HAPWAM, and these features should feed the subsequent visual stream and the decoder fusion path. Do not imply HLG participates in Stage 1 or Stage 2.
+7. On the right side, draw a Top-down Lightweight Decoder. It starts from the high-level Stage 4 output and progressively upsamples and fuses Stage 3, Stage 2, and Stage 1 features. The decoder outputs to a Lightweight Prediction Head, which produces Final Prediction (P) and a Lesion Mask.
+8. At the bottom, draw a separate dashed Training Objectives panel with a light gray background. It must be visually marked as training-only supervision, not an inference forward path. Inside the panel: Final Prediction (P) + Ground Truth Mask (Y) -> Segmentation Loss L_seg; Stage 3/4 suppression gate map (G_i) + Omega_dis + Omega_fh -> Auxiliary Gate Loss L_gate; L_seg and L_gate -> Total Loss L. Use dashed auxiliary supervision arrows into this panel.
+
+Color palette:
+- Text/language branch: light blue.
+- Visual backbone and stages: light green or cyan.
+- HAPWAM: warm low-saturation orange.
+- HLG: muted red or pink accent, not saturated.
+- Decoder and prediction head: muted purple or gray-blue.
+- Training objectives: light gray dashed box.
+- Main forward arrows should be slightly thicker than auxiliary/training arrows.
+
+Text labels that must appear exactly:
+Language-Aware Visual Encoding, DeBERTa, Token-level Language Features (L), Text Valid Mask (M), Swin-B, Stage 1 (V_1), Stage 2 (V_2), Stage 3 (V_3), Stage 4 (V_4), Hierarchically Adaptive Pixel-Word Alignment Module (HAPWAM), Healthy-Suppressed Language Gate (HLG), suppression gate map (G_i), V_i, F_i, E_i, Top-down Lightweight Decoder, Lightweight Prediction Head, Final Prediction (P), Lesion Mask, Segmentation Loss L_seg, Auxiliary Gate Loss L_gate, Total Loss L, Referring Expression (T), Image (I).
+
+Do not include LAVT, healthy prototype branch, explicit contrastive learning block, transformer decoder, independent sentence-level encoder, disease classifier branch, detection box output, multi-class segmentation output, or HLG in Stage 1 or Stage 2. Do not draw this as "LAVT plus replacement modules." Do not add extra modules that are not listed above. Avoid decorative icons, cluttered backgrounds, 3D effects, heavy shadows, or unreadable tiny text.

@@ -74,7 +74,7 @@ def get_parser():
     parser.add_argument('--hlg_hidden_channels', default=None, type=int,
                         help='hidden channels for HLG; defaults to the stage channel dimension when omitted')
     parser.add_argument('--hlg_stages', default=[3, 4], nargs='+', type=int,
-                        help='1-based stage ids that use HLG when gate_module=hlg; defaults to stages 3 and 4')
+                        help='1-based stage ids that use HLG when gate_module=hlg; valid stages are 1, 2, 3, and 4')
     parser.add_argument('--hlg_suppression_alpha', default=0.5, type=float,
                         help='fixed suppression strength for HLG suppression maps')
     parser.add_argument('--img_size', default=480, type=int, help='input image size')
@@ -166,9 +166,9 @@ def validate_args(args):
         raise ValueError('gate_module={} requires align_module to be one of plain/pwam/spam/hapwam'.format(gate_module))
 
     if gate_module == 'hlg':
-        invalid_hlg_stages = [stage for stage in hlg_stages if stage not in (3, 4)]
+        invalid_hlg_stages = [stage for stage in hlg_stages if stage not in (1, 2, 3, 4)]
         if invalid_hlg_stages:
-            raise ValueError('gate_module=hlg only supports stages 3 and 4, got {}'.format(invalid_hlg_stages))
+            raise ValueError('gate_module=hlg only supports stages 1, 2, 3, and 4, got {}'.format(invalid_hlg_stages))
         if not hlg_stages:
             raise ValueError('gate_module=hlg requires at least one stage id in --hlg_stages')
 
