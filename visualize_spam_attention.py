@@ -103,6 +103,16 @@ def token_text_color(score):
     return '#ffffff' if luminance < 90.0 else '#111111'
 
 
+def display_token_label(token):
+    return token.replace('##', '').replace('▁', '').replace('Ġ', '').strip() or token
+
+
+def should_display_token(token, valid):
+    if not valid:
+        return False
+    return token not in ('[CLS]', '[SEP]', '[PAD]', '<s>', '</s>', '<pad>')
+
+
 def infer_square_hw(hw):
     side = int(round(hw ** 0.5))
     if side * side != hw:
@@ -265,9 +275,9 @@ def _write_token_chip_svg(svg_path, tokens, valid_mask, scores):
     chips = []
 
     for index, token in enumerate(tokens):
-        if not valid_mask[index]:
+        if not should_display_token(token, valid_mask[index]):
             continue
-        label = token.replace('##', '')
+        label = display_token_label(token)
         width = max(64, 28 + len(label) * 14)
         if x > margin and x + width > max_width - margin:
             x = margin
