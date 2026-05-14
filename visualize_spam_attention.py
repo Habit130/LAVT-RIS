@@ -229,99 +229,83 @@ def write_token_scores(records, tokens, valid_mask, output_dir):
 
 
 def write_token_importance_svg(records, tokens, valid_mask, output_dir):
-    rows = []
-    row_height = 46
-    left = 190
-    top = 36
-    chip_height = 24
-    gap = 6
-    max_width = 0
+    stage_scores = [record['token_importance'][0].numpy() for record in records.values()]
+    if not stage_scores:
+        raise RuntimeError('Cannot write token SVG without SPAM token scores.')
+    scores = np.stack(stage_scores, axis=0).mean(axis=0)
+    svg_path = output_dir / 'spam_token_importance.svg'
+    _write_token_chip_svg(svg_path, tokens, valid_mask, scores)
 
+    stage_dir = output_dir / 'spam_token_importance_by_stage'
+    stage_dir.mkdir(parents=True, exist_ok=True)
     for stage_name, record in records.items():
-        scores = record['token_importance'][0].numpy()
-        valid_scores = np.array([scores[idx] for idx, valid in enumerate(valid_mask) if valid], dtype=np.float32)
-        if valid_scores.size:
-            lo = float(valid_scores.min())
-            hi = float(valid_scores.max())
-        else:
-            lo, hi = 0.0, 1.0
-        denom = max(hi - lo, 1e-12)
+        stage_path = stage_dir / '{}.svg'.format(stage_name.replace('.', '_'))
+        _write_token_chip_svg(stage_path, tokens, valid_mask, record['token_importance'][0].numpy())
 
-        chips = []
-        x = left
-        top_indices = sorted(
-            [idx for idx, valid in enumerate(valid_mask) if valid],
-            key=lambda idx: float(scores[idx]),
-            reverse=True,
-        )[:8]
-        top_set = set(top_indices)
-        for index, token in enumerate(tokens):
-            if not valid_mask[index]:
-                continue
-            normalized = (float(scores[index]) - lo) / denom
-            label = token.replace('##', '')
-            width = max(34, 12 + len(label) * 8)
-            chips.append({
-                'x': x,
-                'width': width,
-                'label': label,
-                'score': float(scores[index]),
-                'normalized': normalized,
-                'is_top': index in top_set,
-            })
-            x += width + gap
-        max_width = max(max_width, x + 20)
-        rows.append({
-            'stage': stage_name,
-            'chips': chips,
-            'top': [(tokens[idx], float(scores[idx])) for idx in top_indices],
+    return svg_path
+
+
+def _write_token_chip_svg(svg_path, tokens, valid_mask, scores):
+    valid_scores = np.array([scores[idx] for idx, valid in enumerate(valid_mask) if valid], dtype=np.float32)
+    if valid_scores.size:
+        lo = float(valid_scores.min())
+        hi = float(valid_scores.max())
+    else:
+        lo, hi = 0.0, 1.0
+    denom = max(hi - lo, 1e-12)
+
+    margin = 24
+    max_width = 1100
+    gap_x = 12
+    gap_y = 12
+    chip_height = 42
+    font_size = 22
+    x = margin
+    y = margin
+    chips = []
+
+    for index, token in enumerate(tokens):
+        if not valid_mask[index]:
+            continue
+        label = token.replace('##', '')
+        width = max(64, 28 + len(label) * 14)
+        if x > margin and x + width > max_width - margin:
+            x = margin
+            y += chip_height + gap_y
+        normalized = (float(scores[index]) - lo) / denom
+        chips.append({
+            'x': x,
+            'y': y,
+            'width': width,
+            'label': label,
+            'normalized': normalized,
         })
+        x += width + gap_x
 
-    width = max(980, max_width)
-    height = top + len(rows) * row_height + 120
+    height = y + chip_height + margin
     parts = [
         '<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}">'.format(
-            width, height, width, height),
+            max_width, height, max_width, height),
         '<rect width="100%" height="100%" fill="#ffffff"/>',
-        '<text x="24" y="24" font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#111111">'
-        'SPAM token importance: blue low, red high</text>',
     ]
 
-    for row_index, row in enumerate(rows):
-        y = top + row_index * row_height
-        parts.append('<text x="24" y="{}" font-family="Arial, sans-serif" font-size="13" fill="#111111">{}</text>'.format(
-            y + 17, html.escape(row['stage'])))
-        for chip in row['chips']:
-            fill = token_fill(chip['normalized'])
-            stroke = '#111111' if chip['is_top'] else '#ffffff'
-            stroke_width = 1.6 if chip['is_top'] else 0.6
-            text_color = token_text_color(chip['normalized'])
-            parts.append(
-                '<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="5" fill="{fill}" '
-                'stroke="{stroke}" stroke-width="{sw}"/>'.format(
-                    x=chip['x'], y=y, w=chip['width'], h=chip_height,
-                    fill=fill, stroke=stroke, sw=stroke_width))
-            parts.append(
-                '<text x="{x}" y="{y}" font-family="Arial, sans-serif" font-size="12" '
-                'text-anchor="middle" fill="{color}">{label}</text>'.format(
-                    x=chip['x'] + chip['width'] / 2,
-                    y=y + 16,
-                    color=text_color,
-                    label=html.escape(chip['label'])))
-
-    legend_y = top + len(rows) * row_height + 28
-    parts.append('<text x="24" y="{}" font-family="Arial, sans-serif" font-size="13" '
-                 'font-weight="700" fill="#111111">Top valid tokens per stage</text>'.format(legend_y))
-    for row_index, row in enumerate(rows):
-        y = legend_y + 24 + row_index * 20
-        top_text = ', '.join('{}={:.4f}'.format(token.replace('##', ''), score) for token, score in row['top'])
-        parts.append('<text x="24" y="{}" font-family="Arial, sans-serif" font-size="12" fill="#111111">{}</text>'.format(
-            y, html.escape('{}: {}'.format(row['stage'], top_text))))
+    for chip in chips:
+        fill = token_fill(chip['normalized'])
+        color = token_text_color(chip['normalized'])
+        parts.append(
+            '<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="7" fill="{fill}"/>'.format(
+                x=chip['x'], y=chip['y'], w=chip['width'], h=chip_height, fill=fill))
+        parts.append(
+            '<text x="{x}" y="{y}" font-family="Arial, sans-serif" font-size="{fs}" '
+            'font-weight="700" text-anchor="middle" fill="{color}">{label}</text>'.format(
+                x=chip['x'] + chip['width'] / 2,
+                y=chip['y'] + 28,
+                fs=font_size,
+                color=color,
+                label=html.escape(chip['label'])))
 
     parts.append('</svg>')
-    svg_path = output_dir / 'spam_token_importance.svg'
     svg_path.write_text('\n'.join(parts), encoding='utf-8')
-    return svg_path
 
 
 def export_stage_maps(records, tokens, valid_mask, original_image, output_dir, top_k, alpha):
