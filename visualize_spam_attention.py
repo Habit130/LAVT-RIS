@@ -1,5 +1,6 @@
 import argparse
 import csv
+import html
 import json
 import re
 from pathlib import Path
@@ -85,6 +86,21 @@ def save_prediction_overlay(original_image, prediction, output_path, alpha=0.45)
     overlay = base.copy()
     overlay[pred_array] = ((1.0 - alpha) * base[pred_array] + alpha * red[pred_array])
     Image.fromarray(overlay.clip(0, 255).astype(np.uint8)).save(output_path)
+
+
+def token_fill(score):
+    score = float(np.clip(score, 0.0, 1.0))
+    red = int(round(255.0 * score))
+    blue = int(round(255.0 * (1.0 - score)))
+    return '#{:02x}00{:02x}'.format(red, blue)
+
+
+def token_text_color(score):
+    score = float(np.clip(score, 0.0, 1.0))
+    red = 255.0 * score
+    blue = 255.0 * (1.0 - score)
+    luminance = 0.2126 * red + 0.0722 * blue
+    return '#ffffff' if luminance < 90.0 else '#111111'
 
 
 def infer_square_hw(hw):
@@ -212,6 +228,102 @@ def write_token_scores(records, tokens, valid_mask, output_dir):
     return csv_path
 
 
+def write_token_importance_svg(records, tokens, valid_mask, output_dir):
+    rows = []
+    row_height = 46
+    left = 190
+    top = 36
+    chip_height = 24
+    gap = 6
+    max_width = 0
+
+    for stage_name, record in records.items():
+        scores = record['token_importance'][0].numpy()
+        valid_scores = np.array([scores[idx] for idx, valid in enumerate(valid_mask) if valid], dtype=np.float32)
+        if valid_scores.size:
+            lo = float(valid_scores.min())
+            hi = float(valid_scores.max())
+        else:
+            lo, hi = 0.0, 1.0
+        denom = max(hi - lo, 1e-12)
+
+        chips = []
+        x = left
+        top_indices = sorted(
+            [idx for idx, valid in enumerate(valid_mask) if valid],
+            key=lambda idx: float(scores[idx]),
+            reverse=True,
+        )[:8]
+        top_set = set(top_indices)
+        for index, token in enumerate(tokens):
+            if not valid_mask[index]:
+                continue
+            normalized = (float(scores[index]) - lo) / denom
+            label = token.replace('##', '')
+            width = max(34, 12 + len(label) * 8)
+            chips.append({
+                'x': x,
+                'width': width,
+                'label': label,
+                'score': float(scores[index]),
+                'normalized': normalized,
+                'is_top': index in top_set,
+            })
+            x += width + gap
+        max_width = max(max_width, x + 20)
+        rows.append({
+            'stage': stage_name,
+            'chips': chips,
+            'top': [(tokens[idx], float(scores[idx])) for idx in top_indices],
+        })
+
+    width = max(980, max_width)
+    height = top + len(rows) * row_height + 120
+    parts = [
+        '<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}">'.format(
+            width, height, width, height),
+        '<rect width="100%" height="100%" fill="#ffffff"/>',
+        '<text x="24" y="24" font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#111111">'
+        'SPAM token importance: blue low, red high</text>',
+    ]
+
+    for row_index, row in enumerate(rows):
+        y = top + row_index * row_height
+        parts.append('<text x="24" y="{}" font-family="Arial, sans-serif" font-size="13" fill="#111111">{}</text>'.format(
+            y + 17, html.escape(row['stage'])))
+        for chip in row['chips']:
+            fill = token_fill(chip['normalized'])
+            stroke = '#111111' if chip['is_top'] else '#ffffff'
+            stroke_width = 1.6 if chip['is_top'] else 0.6
+            text_color = token_text_color(chip['normalized'])
+            parts.append(
+                '<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="5" fill="{fill}" '
+                'stroke="{stroke}" stroke-width="{sw}"/>'.format(
+                    x=chip['x'], y=y, w=chip['width'], h=chip_height,
+                    fill=fill, stroke=stroke, sw=stroke_width))
+            parts.append(
+                '<text x="{x}" y="{y}" font-family="Arial, sans-serif" font-size="12" '
+                'text-anchor="middle" fill="{color}">{label}</text>'.format(
+                    x=chip['x'] + chip['width'] / 2,
+                    y=y + 16,
+                    color=text_color,
+                    label=html.escape(chip['label'])))
+
+    legend_y = top + len(rows) * row_height + 28
+    parts.append('<text x="24" y="{}" font-family="Arial, sans-serif" font-size="13" '
+                 'font-weight="700" fill="#111111">Top valid tokens per stage</text>'.format(legend_y))
+    for row_index, row in enumerate(rows):
+        y = legend_y + 24 + row_index * 20
+        top_text = ', '.join('{}={:.4f}'.format(token.replace('##', ''), score) for token, score in row['top'])
+        parts.append('<text x="24" y="{}" font-family="Arial, sans-serif" font-size="12" fill="#111111">{}</text>'.format(
+            y, html.escape('{}: {}'.format(row['stage'], top_text))))
+
+    parts.append('</svg>')
+    svg_path = output_dir / 'spam_token_importance.svg'
+    svg_path.write_text('\n'.join(parts), encoding='utf-8')
+    return svg_path
+
+
 def export_stage_maps(records, tokens, valid_mask, original_image, output_dir, top_k, alpha):
     summary = {}
     valid_indices = [idx for idx, valid in enumerate(valid_mask) if valid]
@@ -319,6 +431,7 @@ def main(args):
     save_prediction_overlay(original, prediction, output_dir / 'prediction_overlay.png')
     valid_mask = attention_mask.squeeze(0).detach().cpu().bool().tolist()
     token_csv = write_token_scores(records, tokens, valid_mask, output_dir)
+    token_svg = write_token_importance_svg(records, tokens, valid_mask, output_dir)
     summary = export_stage_maps(records, tokens, valid_mask, original, output_dir,
                                 args.top_tokens, args.overlay_alpha)
     hlg_summary = export_hlg_maps(aux_outputs, original, output_dir, args.overlay_alpha)
@@ -338,6 +451,7 @@ def main(args):
         'image_focus_all_spam_stages_anomaly_response': str(
             output_dir / 'image_focus_all_spam_stages_anomaly_response.png'),
         'token_scores_csv': str(token_csv),
+        'token_importance_svg': str(token_svg),
         'stages': summary,
         'hlg_suppression': hlg_summary,
     }
