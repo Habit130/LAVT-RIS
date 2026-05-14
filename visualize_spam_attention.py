@@ -33,7 +33,7 @@ def add_visualization_args(parser):
                         help='directory where heatmaps and token scores are written')
     parser.add_argument('--top_tokens', default=8, type=int,
                         help='number of highest-importance valid tokens to render per SPAM stage')
-    parser.add_argument('--overlay_alpha', default=0.45, type=float,
+    parser.add_argument('--overlay_alpha', default=0.55, type=float,
                         help='heatmap overlay opacity in [0, 1]')
     return parser
 
@@ -55,11 +55,10 @@ def normalize_map(array):
 
 def colorize_heatmap(heatmap):
     heatmap = normalize_map(heatmap)
-    red = np.clip(1.5 * heatmap, 0.0, 1.0)
-    green = np.clip(1.5 * heatmap - 0.35, 0.0, 1.0)
-    blue = np.clip(1.0 - 1.5 * heatmap, 0.0, 1.0) * 0.35
-    rgb = np.stack([red, green, blue], axis=-1)
-    return (rgb * 255).astype(np.uint8)
+    low = np.array([37, 99, 235], dtype=np.float32)
+    high = np.array([239, 68, 68], dtype=np.float32)
+    rgb = low[None, None, :] * (1.0 - heatmap[..., None]) + high[None, None, :] * heatmap[..., None]
+    return rgb.clip(0, 255).astype(np.uint8)
 
 
 def resize_array(array, size):
