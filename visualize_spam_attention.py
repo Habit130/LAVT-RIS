@@ -1,8 +1,6 @@
 import argparse
 import csv
-import html
 import json
-import re
 from pathlib import Path
 
 import numpy as np
@@ -26,23 +24,21 @@ IMAGENET_STD = [0.229, 0.224, 0.225]
 
 
 def add_visualization_args(parser):
-    parser.add_argument('--image_path', required=True,
+    parser.add_argument('--image_path', default='',
                         help='input RGB image for SPAM attention visualization')
-    parser.add_argument('--sentence', required=True,
+    parser.add_argument('--sentence', default='',
                         help='referring expression used for mask generation')
     parser.add_argument('--attention_output_dir', required=True,
                         help='directory where heatmaps and token scores are written')
-    parser.add_argument('--top_tokens', default=8, type=int,
-                        help='number of highest-importance valid tokens to render per SPAM stage')
+    parser.add_argument('--batch_test_all', action='store_true',
+                        help='visualize every sample in the PlantSeg split specified by --batch_split')
+    parser.add_argument('--batch_split', default='test',
+                        help='PlantSeg split to use when --batch_test_all is set')
+    parser.add_argument('--batch_limit', default=0, type=int,
+                        help='optional maximum number of samples for batch visualization; 0 means all')
     parser.add_argument('--overlay_alpha', default=0.80, type=float,
                         help='heatmap overlay opacity in [0, 1]')
     return parser
-
-
-def safe_name(text):
-    text = text.replace('##', '')
-    text = re.sub(r'[^0-9A-Za-z._-]+', '_', text)
-    return text.strip('_') or 'token'
 
 
 def normalize_map(array):
@@ -74,43 +70,6 @@ def save_heatmap_overlay(original_image, heatmap, output_path, alpha):
     base = np.asarray(original_image).astype(np.float32)
     overlay = ((1.0 - alpha) * base + alpha * color).clip(0, 255).astype(np.uint8)
     Image.fromarray(overlay).save(output_path)
-
-
-def save_prediction_overlay(original_image, prediction, output_path, alpha=0.45):
-    pred = Image.fromarray((prediction.astype(np.uint8) * 255), mode='L')
-    pred = pred.resize(original_image.size, resample=Image.NEAREST)
-    pred_array = np.asarray(pred) > 0
-    base = np.asarray(original_image).astype(np.float32)
-    red = np.zeros_like(base)
-    red[..., 0] = 255
-    overlay = base.copy()
-    overlay[pred_array] = ((1.0 - alpha) * base[pred_array] + alpha * red[pred_array])
-    Image.fromarray(overlay.clip(0, 255).astype(np.uint8)).save(output_path)
-
-
-def token_fill(score):
-    score = float(np.clip(score, 0.0, 1.0))
-    red = int(round(255.0 * score))
-    blue = int(round(255.0 * (1.0 - score)))
-    return '#{:02x}00{:02x}'.format(red, blue)
-
-
-def token_text_color(score):
-    score = float(np.clip(score, 0.0, 1.0))
-    red = 255.0 * score
-    blue = 255.0 * (1.0 - score)
-    luminance = 0.2126 * red + 0.0722 * blue
-    return '#ffffff' if luminance < 90.0 else '#111111'
-
-
-def display_token_label(token):
-    return token.replace('##', '').replace('▁', '').replace('Ġ', '').strip() or token
-
-
-def should_display_token(token, valid):
-    if not valid:
-        return False
-    return token not in ('[CLS]', '[SEP]', '[PAD]', '<s>', '</s>', '<pad>')
 
 
 def infer_square_hw(hw):
@@ -150,17 +109,13 @@ def recompute_spam_attention(module, inputs):
     sim_map = torch.matmul(query, key) * (head_key_channels ** -0.5)
     sim_map = sim_map.masked_fill(mask_channels.unsqueeze(1) <= 0, -1e4)
     sim_map = F.softmax(sim_map, dim=-1)
-    anomaly_response = module.anomaly_score(x)
-
     h, w = infer_square_hw(hw)
     token_weighted = (sim_map.mean(dim=1) * token_importance.squeeze(-1).unsqueeze(1)).sum(dim=-1)
 
     return {
         'height': h,
         'width': w,
-        'sim_map': sim_map.detach().cpu(),
         'token_importance': token_importance.squeeze(-1).detach().cpu(),
-        'anomaly_response': anomaly_response.squeeze(-1).detach().cpu(),
         'token_weighted_attention': token_weighted.detach().cpu(),
     }
 
@@ -203,15 +158,15 @@ def build_model_and_text(args, device):
     return model, text_encoder, tokenizer
 
 
-def prepare_inputs(args, tokenizer, device):
-    original = Image.open(args.image_path).convert('RGB')
+def prepare_inputs(args, tokenizer, device, image_path, sentence):
+    original = Image.open(image_path).convert('RGB')
     transform = TV.Compose([
         TV.Resize((args.img_size, args.img_size)),
         TV.ToTensor(),
         TV.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
     ])
     image = transform(original).unsqueeze(0).to(device)
-    input_ids, attention_mask = tokenize_text(tokenizer, args.sentence, args.max_text_tokens)
+    input_ids, attention_mask = tokenize_text(tokenizer, sentence, args.max_text_tokens)
     input_ids = input_ids.to(device)
     attention_mask = attention_mask.to(device)
     tokens = tokenizer.convert_ids_to_tokens(input_ids.squeeze(0).detach().cpu().tolist())
@@ -238,137 +193,30 @@ def write_token_scores(records, tokens, valid_mask, output_dir):
     return csv_path
 
 
-def write_token_importance_svg(records, tokens, valid_mask, output_dir):
-    stage_scores = [record['token_importance'][0].numpy() for record in records.values()]
-    if not stage_scores:
-        raise RuntimeError('Cannot write token SVG without SPAM token scores.')
-    scores = np.stack(stage_scores, axis=0).mean(axis=0)
-    svg_path = output_dir / 'spam_token_importance.svg'
-    _write_token_chip_svg(svg_path, tokens, valid_mask, scores)
-
-    stage_dir = output_dir / 'spam_token_importance_by_stage'
-    stage_dir.mkdir(parents=True, exist_ok=True)
-    for stage_name, record in records.items():
-        stage_path = stage_dir / '{}.svg'.format(stage_name.replace('.', '_'))
-        _write_token_chip_svg(stage_path, tokens, valid_mask, record['token_importance'][0].numpy())
-
-    return svg_path
-
-
-def _write_token_chip_svg(svg_path, tokens, valid_mask, scores):
-    valid_scores = np.array([scores[idx] for idx, valid in enumerate(valid_mask) if valid], dtype=np.float32)
-    if valid_scores.size:
-        lo = float(valid_scores.min())
-        hi = float(valid_scores.max())
-    else:
-        lo, hi = 0.0, 1.0
-    denom = max(hi - lo, 1e-12)
-
-    margin = 24
-    max_width = 1100
-    gap_x = 12
-    gap_y = 12
-    chip_height = 42
-    font_size = 22
-    x = margin
-    y = margin
-    chips = []
-
-    for index, token in enumerate(tokens):
-        if not should_display_token(token, valid_mask[index]):
-            continue
-        label = display_token_label(token)
-        width = max(64, 28 + len(label) * 14)
-        if x > margin and x + width > max_width - margin:
-            x = margin
-            y += chip_height + gap_y
-        normalized = (float(scores[index]) - lo) / denom
-        chips.append({
-            'x': x,
-            'y': y,
-            'width': width,
-            'label': label,
-            'normalized': normalized,
-        })
-        x += width + gap_x
-
-    height = y + chip_height + margin
-    parts = [
-        '<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}">'.format(
-            max_width, height, max_width, height),
-        '<rect width="100%" height="100%" fill="#ffffff"/>',
-    ]
-
-    for chip in chips:
-        fill = token_fill(chip['normalized'])
-        color = token_text_color(chip['normalized'])
-        parts.append(
-            '<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="7" fill="{fill}"/>'.format(
-                x=chip['x'], y=chip['y'], w=chip['width'], h=chip_height, fill=fill))
-        parts.append(
-            '<text x="{x}" y="{y}" font-family="Arial, sans-serif" font-size="{fs}" '
-            'font-weight="700" text-anchor="middle" fill="{color}">{label}</text>'.format(
-                x=chip['x'] + chip['width'] / 2,
-                y=chip['y'] + 28,
-                fs=font_size,
-                color=color,
-                label=html.escape(chip['label'])))
-
-    parts.append('</svg>')
-    svg_path.write_text('\n'.join(parts), encoding='utf-8')
-
-
-def export_stage_maps(records, tokens, valid_mask, original_image, output_dir, top_k, alpha):
+def export_spam_maps(records, original_image, output_dir, alpha):
     summary = {}
-    valid_indices = [idx for idx, valid in enumerate(valid_mask) if valid]
     aggregate_weighted = []
-    aggregate_anomaly = []
 
     for stage_name, record in records.items():
-        stage_dir = output_dir / stage_name.replace('.', '_')
-        stage_dir.mkdir(parents=True, exist_ok=True)
+        stage_key = stage_name.replace('.', '_')
         h, w = record['height'], record['width']
-        token_scores = record['token_importance'][0].numpy()
-
-        anomaly = record['anomaly_response'][0].reshape(h, w).numpy()
         weighted = record['token_weighted_attention'][0].reshape(h, w).numpy()
-        save_heatmap_overlay(original_image, anomaly, stage_dir / 'image_focus_anomaly_response.png', alpha)
-        save_heatmap_overlay(original_image, weighted, stage_dir / 'image_focus_token_weighted.png', alpha)
-        aggregate_anomaly.append(resize_array(anomaly, original_image.size))
+        output_path = output_dir / 'spam_{}_token_weighted.png'.format(stage_key)
+        save_heatmap_overlay(original_image, weighted, output_path, alpha)
         aggregate_weighted.append(resize_array(weighted, original_image.size))
-
-        ranked = sorted(valid_indices, key=lambda idx: float(token_scores[idx]), reverse=True)
-        ranked = ranked[:max(0, top_k)]
-        stage_rows = []
-        sim_mean = record['sim_map'][0].mean(dim=0)
-        for rank, token_index in enumerate(ranked, start=1):
-            token_map = sim_mean[:, token_index].reshape(h, w).numpy()
-            token_name = safe_name(tokens[token_index])
-            out_name = 'token_{:02d}_idx{:02d}_{}.png'.format(rank, token_index, token_name)
-            save_heatmap_overlay(original_image, token_map, stage_dir / out_name, alpha)
-            stage_rows.append({
-                'rank': rank,
-                'token_index': token_index,
-                'token': tokens[token_index],
-                'token_importance': float(token_scores[token_index]),
-                'heatmap': str(stage_dir / out_name),
-            })
 
         summary[stage_name] = {
             'spatial_size': [h, w],
-            'image_focus_anomaly_response': str(stage_dir / 'image_focus_anomaly_response.png'),
-            'image_focus_token_weighted': str(stage_dir / 'image_focus_token_weighted.png'),
-            'top_tokens': stage_rows,
+            'spam_token_weighted': str(output_path),
         }
 
     if aggregate_weighted:
         all_stage_weighted = np.stack(aggregate_weighted, axis=0).mean(axis=0)
-        save_heatmap_overlay(original_image, all_stage_weighted,
-                             output_dir / 'image_focus_all_spam_stages_token_weighted.png', alpha)
-    if aggregate_anomaly:
-        all_stage_anomaly = np.stack(aggregate_anomaly, axis=0).mean(axis=0)
-        save_heatmap_overlay(original_image, all_stage_anomaly,
-                             output_dir / 'image_focus_all_spam_stages_anomaly_response.png', alpha)
+        output_path = output_dir / 'spam_all_stages_token_weighted.png'
+        save_heatmap_overlay(original_image, all_stage_weighted, output_path, alpha)
+        summary['all_stages'] = {
+            'spam_token_weighted': str(output_path),
+        }
 
     return summary
 
@@ -378,60 +226,71 @@ def export_hlg_maps(aux_outputs, original_image, output_dir, alpha):
     if not aux_outputs:
         return summary
 
-    hlg_dir = output_dir / 'hlg_suppression'
-    hlg_dir.mkdir(parents=True, exist_ok=True)
     aggregate = []
     for name, tensor in sorted(aux_outputs.items()):
         if not name.startswith('hlg_stage'):
             continue
         heatmap = tensor.detach().cpu()[0].mean(dim=0).numpy()
-        output_path = hlg_dir / '{}_suppression.png'.format(name)
+        output_path = output_dir / '{}_suppression.png'.format(name)
         save_heatmap_overlay(original_image, heatmap, output_path, alpha)
         aggregate.append(resize_array(heatmap, original_image.size))
         summary[name] = str(output_path)
 
     if aggregate:
-        output_path = hlg_dir / 'all_hlg_stages_suppression.png'
+        output_path = output_dir / 'hlg_all_stages_suppression.png'
         save_heatmap_overlay(original_image, np.stack(aggregate, axis=0).mean(axis=0), output_path, alpha)
         summary['all_hlg_stages'] = str(output_path)
     return summary
 
 
-def main(args):
-    if not args.resume:
-        raise ValueError('--resume is required for trained-weight SPAM attention visualization.')
-    device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
-    output_dir = Path(args.attention_output_dir).expanduser().resolve()
+def write_raw_arrays(records, aux_outputs, tokens, valid_mask, output_dir):
+    arrays = {
+        'tokens': np.array(tokens),
+        'valid_token_mask': np.array(valid_mask, dtype=np.bool_),
+    }
+    for stage_name, record in records.items():
+        stage_key = stage_name.replace('.', '_')
+        h, w = record['height'], record['width']
+        arrays['spam_spatial_size__{}'.format(stage_key)] = np.array([h, w], dtype=np.int32)
+        arrays['token_importance__{}'.format(stage_key)] = record['token_importance'][0].numpy()
+        arrays['spam_token_weighted__{}'.format(stage_key)] = \
+            record['token_weighted_attention'][0].reshape(h, w).numpy()
+    for name, tensor in sorted(aux_outputs.items()):
+        if name.startswith('hlg_stage'):
+            arrays['hlg_suppression__{}'.format(name)] = tensor.detach().cpu()[0].mean(dim=0).numpy()
+
+    output_path = output_dir / 'attention_raw_arrays.npz'
+    np.savez_compressed(output_path, **arrays)
+    return output_path
+
+
+def run_one_sample(args, model, text_encoder, tokenizer, device, sample_id, image_path, sentence, output_dir):
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    model, text_encoder, tokenizer = build_model_and_text(args, device)
-    original, image, input_ids, attention_mask, tokens = prepare_inputs(args, tokenizer, device)
-
+    original, image, input_ids, attention_mask, tokens = prepare_inputs(args, tokenizer, device, image_path, sentence)
     records = {}
     handles = register_spam_hooks(model, records)
     if not handles:
         raise RuntimeError('No SPAM modules were found. Use --ablation_config spam_only or --ablation_config ours.')
 
-    with torch.no_grad():
-        output, aux_outputs = forward_model(model, text_encoder, image, input_ids, attention_mask)
-        prediction = output.argmax(1).squeeze(0).detach().cpu().numpy().astype(np.uint8)
-
-    for handle in handles:
-        handle.remove()
+    try:
+        with torch.no_grad():
+            _output, aux_outputs = forward_model(model, text_encoder, image, input_ids, attention_mask)
+    finally:
+        for handle in handles:
+            handle.remove()
 
     if not records:
         raise RuntimeError('SPAM hooks did not record attention. Check that the loaded model actually uses SPAM.')
 
-    save_prediction_overlay(original, prediction, output_dir / 'prediction_overlay.png')
     valid_mask = attention_mask.squeeze(0).detach().cpu().bool().tolist()
     token_csv = write_token_scores(records, tokens, valid_mask, output_dir)
-    token_svg = write_token_importance_svg(records, tokens, valid_mask, output_dir)
-    summary = export_stage_maps(records, tokens, valid_mask, original, output_dir,
-                                args.top_tokens, args.overlay_alpha)
+    spam_summary = export_spam_maps(records, original, output_dir, args.overlay_alpha)
     hlg_summary = export_hlg_maps(aux_outputs, original, output_dir, args.overlay_alpha)
+    raw_npz = write_raw_arrays(records, aux_outputs, tokens, valid_mask, output_dir)
     metadata = {
-        'image_path': str(Path(args.image_path).expanduser().resolve()),
-        'sentence': args.sentence,
+        'sample_id': sample_id,
+        'image_path': str(Path(image_path).expanduser().resolve()),
+        'sentence': sentence,
         'resume': args.resume,
         'ablation_config': args.ablation_config,
         'align_module': args.align_module,
@@ -439,20 +298,73 @@ def main(args):
         'hlg_stages': args.hlg_stages,
         'tokens': tokens,
         'valid_token_mask': valid_mask,
-        'prediction_overlay': str(output_dir / 'prediction_overlay.png'),
-        'image_focus_all_spam_stages_token_weighted': str(
-            output_dir / 'image_focus_all_spam_stages_token_weighted.png'),
-        'image_focus_all_spam_stages_anomaly_response': str(
-            output_dir / 'image_focus_all_spam_stages_anomaly_response.png'),
         'token_scores_csv': str(token_csv),
-        'token_importance_svg': str(token_svg),
-        'stages': summary,
+        'raw_arrays_npz': str(raw_npz),
+        'spam_attention': spam_summary,
         'hlg_suppression': hlg_summary,
     }
     with (output_dir / 'spam_attention_summary.json').open('w', encoding='utf-8') as handle:
         json.dump(metadata, handle, ensure_ascii=False, indent=2)
 
-    print('Wrote SPAM attention visualization to {}'.format(output_dir))
+    return metadata
+
+
+def load_batch_samples(args):
+    if args.dataset != 'plantseg':
+        raise ValueError('--batch_test_all currently requires --dataset plantseg.')
+    root = Path(args.plantseg_root).expanduser().resolve()
+    metadata_path = root / 'main.json'
+    with metadata_path.open('r', encoding='utf-8') as handle:
+        records = json.load(handle)
+    samples = [record for record in records if record.get('split') == args.batch_split]
+    if args.batch_limit > 0:
+        samples = samples[:args.batch_limit]
+    if not samples:
+        raise ValueError('No samples found for split [{}] under {}'.format(args.batch_split, metadata_path))
+    return samples
+
+
+def main(args):
+    if not args.resume:
+        raise ValueError('--resume is required for trained-weight SPAM attention visualization.')
+    device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
+    output_root = Path(args.attention_output_dir).expanduser().resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    model, text_encoder, tokenizer = build_model_and_text(args, device)
+
+    if args.batch_test_all:
+        samples = load_batch_samples(args)
+        batch_csv = output_root / 'batch_attention_summary.csv'
+        with batch_csv.open('w', newline='', encoding='utf-8') as handle:
+            writer = csv.writer(handle)
+            writer.writerow(['index', 'sample_id', 'image_path', 'output_dir', 'status', 'message'])
+            for index, sample in enumerate(samples):
+                sample_id = str(sample.get('id') or 'sample_{:06d}'.format(index))
+                image_path = Path(args.plantseg_root).expanduser().resolve() / sample['image']
+                captions = sample.get('caption') or []
+                if len(captions) <= args.plantseg_caption_index:
+                    raise IndexError('Sample [{}] does not have caption index {}'.format(
+                        sample_id, args.plantseg_caption_index))
+                sentence = captions[args.plantseg_caption_index]
+                sample_output_dir = output_root / sample_id
+                try:
+                    run_one_sample(args, model, text_encoder, tokenizer, device,
+                                   sample_id, image_path, sentence, sample_output_dir)
+                    writer.writerow([index, sample_id, str(image_path), str(sample_output_dir), 'ok', ''])
+                    print('[{}/{}] wrote {}'.format(index + 1, len(samples), sample_output_dir))
+                except Exception as exc:
+                    writer.writerow([index, sample_id, str(image_path), str(sample_output_dir), 'error', str(exc)])
+                    print('[{}/{}] failed {}: {}'.format(index + 1, len(samples), sample_id, exc))
+        print('Wrote batch SPAM attention summary to {}'.format(batch_csv))
+        return
+
+    if not args.image_path or not args.sentence:
+        raise ValueError('Single-sample mode requires --image_path and --sentence. '
+                         'Use --batch_test_all to process the PlantSeg test split automatically.')
+    run_one_sample(args, model, text_encoder, tokenizer, device,
+                   Path(args.image_path).stem, args.image_path, args.sentence, output_root)
+    print('Wrote SPAM attention visualization to {}'.format(output_root))
 
 
 if __name__ == '__main__':
