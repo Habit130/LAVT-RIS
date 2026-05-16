@@ -1,6 +1,7 @@
 import argparse
 import csv
 import json
+import time
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +37,8 @@ def add_visualization_args(parser):
                         help='PlantSeg split to use when --batch_test_all is set')
     parser.add_argument('--batch_limit', default=0, type=int,
                         help='optional maximum number of samples for batch visualization; 0 means all')
+    parser.add_argument('--raw_only', action='store_true',
+                        help='write raw CSV/NPZ/JSON attention data only and skip all rendered PNG files')
     parser.add_argument('--overlay_alpha', default=0.80, type=float,
                         help='heatmap overlay opacity in [0, 1]')
     return parser
@@ -264,6 +267,32 @@ def write_raw_arrays(records, aux_outputs, tokens, valid_mask, output_dir):
     return output_path
 
 
+def format_duration(seconds):
+    seconds = int(max(0, seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return '{}h{:02d}m{:02d}s'.format(hours, minutes, seconds)
+    return '{}m{:02d}s'.format(minutes, seconds)
+
+
+def print_progress(done, total, start_time, message=''):
+    elapsed = time.time() - start_time
+    rate = done / elapsed if elapsed > 0 else 0.0
+    remaining = (total - done) / rate if rate > 0 else 0.0
+    percent = 100.0 * done / total if total else 100.0
+    bar_width = 28
+    filled = int(round(bar_width * done / total)) if total else bar_width
+    bar = '#' * filled + '-' * (bar_width - filled)
+    line = '[{}] {}/{} {:6.2f}% elapsed {} eta {}'.format(
+        bar, done, total, percent, format_duration(elapsed), format_duration(remaining))
+    if message:
+        line = '{} {}'.format(line, message)
+    print('\r' + line, end='', flush=True)
+    if done >= total:
+        print()
+
+
 def run_one_sample(args, model, text_encoder, tokenizer, device, sample_id, image_path, sentence, output_dir):
     output_dir.mkdir(parents=True, exist_ok=True)
     original, image, input_ids, attention_mask, tokens = prepare_inputs(args, tokenizer, device, image_path, sentence)
@@ -284,8 +313,12 @@ def run_one_sample(args, model, text_encoder, tokenizer, device, sample_id, imag
 
     valid_mask = attention_mask.squeeze(0).detach().cpu().bool().tolist()
     token_csv = write_token_scores(records, tokens, valid_mask, output_dir)
-    spam_summary = export_spam_maps(records, original, output_dir, args.overlay_alpha)
-    hlg_summary = export_hlg_maps(aux_outputs, original, output_dir, args.overlay_alpha)
+    if args.raw_only:
+        spam_summary = {}
+        hlg_summary = {}
+    else:
+        spam_summary = export_spam_maps(records, original, output_dir, args.overlay_alpha)
+        hlg_summary = export_hlg_maps(aux_outputs, original, output_dir, args.overlay_alpha)
     raw_npz = write_raw_arrays(records, aux_outputs, tokens, valid_mask, output_dir)
     metadata = {
         'sample_id': sample_id,
@@ -296,6 +329,7 @@ def run_one_sample(args, model, text_encoder, tokenizer, device, sample_id, imag
         'align_module': args.align_module,
         'gate_module': args.gate_module,
         'hlg_stages': args.hlg_stages,
+        'raw_only': bool(args.raw_only),
         'tokens': tokens,
         'valid_token_mask': valid_mask,
         'token_scores_csv': str(token_csv),
@@ -336,6 +370,8 @@ def main(args):
     if args.batch_test_all:
         samples = load_batch_samples(args)
         batch_csv = output_root / 'batch_attention_summary.csv'
+        start_time = time.time()
+        print_progress(0, len(samples), start_time)
         with batch_csv.open('w', newline='', encoding='utf-8') as handle:
             writer = csv.writer(handle)
             writer.writerow(['index', 'sample_id', 'image_path', 'output_dir', 'status', 'message'])
@@ -352,10 +388,10 @@ def main(args):
                     run_one_sample(args, model, text_encoder, tokenizer, device,
                                    sample_id, image_path, sentence, sample_output_dir)
                     writer.writerow([index, sample_id, str(image_path), str(sample_output_dir), 'ok', ''])
-                    print('[{}/{}] wrote {}'.format(index + 1, len(samples), sample_output_dir))
+                    print_progress(index + 1, len(samples), start_time, 'wrote {}'.format(sample_id))
                 except Exception as exc:
                     writer.writerow([index, sample_id, str(image_path), str(sample_output_dir), 'error', str(exc)])
-                    print('[{}/{}] failed {}: {}'.format(index + 1, len(samples), sample_id, exc))
+                    print_progress(index + 1, len(samples), start_time, 'failed {}: {}'.format(sample_id, exc))
         print('Wrote batch SPAM attention summary to {}'.format(batch_csv))
         return
 
